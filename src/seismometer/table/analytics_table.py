@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import pandas as pd
 
@@ -11,7 +11,7 @@ from pandas.api.types import is_integer_dtype, is_numeric_dtype
 
 from seismometer.controls.explore import ExplorationWidget, _combine_scores_checkbox
 from seismometer.controls.selection import MultiselectDropdownWidget, MultiSelectionListWidget
-from seismometer.controls.styles import BOX_GRID_LAYOUT, WIDE_LABEL_STYLE, html_title
+from seismometer.controls.styles import BOX_GRID_LAYOUT, html_title
 from seismometer.controls.thresholds import MonotonicProbabilitySliderListWidget
 from seismometer.data import pandas_helpers as pdh
 from seismometer.data.binary_performance import GENERATED_COLUMNS, generate_analytics_data
@@ -54,7 +54,7 @@ class AnalyticsTable:
         metrics_to_display: Optional[List[str]] = None,
         title: str = "Model Performance Statistics",
         top_level: str = "Score",
-        cohorts_dict: Optional[dict] = None,
+        cohort_dict: Optional[dict[str, tuple]] = None,
         table_config: Optional[AnalyticsTableConfig] = AnalyticsTableConfig(),
         statistics_data: Optional[pd.DataFrame] = None,
         per_context: bool = False,
@@ -65,31 +65,33 @@ class AnalyticsTable:
 
         Parameters
         ----------
-        score_columns: Optional[List[str]]
+        score_columns: Optional[List[str]], optional
             A list of column names corresponding to model prediction scores, by default None.
-        target_columns: Optional[List[str]]
+        target_columns: Optional[List[str]], optional
             A list of column names corresponding to (binary) targets, by default None.
-        metric: str
-            Performance metrics will be presented for the provided values of this metric.
-        metric_values: List[float]
+        metric: str, optional
+            Performance metrics will be presented for the provided values of this metric, by default "Threshold".
+        metric_values: List[float], optional
             Values for the specified metric to derive detailed performance statistics, by default [0.1, 0.2].
-        metrics_to_display: Optional[List[str]]
+        metrics_to_display: Optional[List[str]], optional
             List of metrics to include in the table, by default None. The default behavior is to show all columns
             in GENERATED_COLUMNS.
-        title: str
+        title: str, optional
             The title for the performance statistics table, by default "Model Performance Statistics".
-        top_level: str
+        top_level: str, optional
             The primary grouping category in the performance table, by default 'Score'.
-        decimals: int
+        cohort_dict : Optional[dict[str,tuple]], optional
+            dictionary of cohort columns and values used to subselect a population for evaluation, by default None.
+        decimals: int, optional
             The number of decimal places for rounding numerical results, by default 3.
-        table_config: Optional[AnalyticsTableConfig]
+        table_config: Optional[AnalyticsTableConfig], optional
             Configuration for the analytics table, including formatting and display options.
-        statistics_data: Optional[pd.DataFrame]
+        statistics_data: Optional[pd.DataFrame], optional
             Additional performance metrics statistics, will be joined with the statistics data generated
             by the code, by default None.
-        per_context : bool
+        per_context : bool, optional
             If scores should be grouped by context, by default False.
-        censor_threshold : int
+        censor_threshold : int, optional
             Minimum rows to allow in a table, by default 10.
 
         Raises
@@ -121,7 +123,7 @@ class AnalyticsTable:
         self.metrics_to_display = metrics_to_display or GENERATED_COLUMNS
         self.title = title
         self.top_level = top_level
-        self.cohorts_dict = cohorts_dict
+        self.cohort_dict = cohort_dict
         self.columns_show_percentages = table_config.columns_show_percentages
 
         self.percentages_decimals = table_config.percentages_decimals
@@ -363,7 +365,7 @@ class AnalyticsTable:
             self.metric,
             self.metric_values,
             top_level=self.top_level,
-            cohorts_dict=self.cohorts_dict,
+            cohort_dict=self.cohort_dict,
             per_context=self.per_context,
             metrics_to_display=self.metrics_to_display,
             decimals=self.decimals,
@@ -406,7 +408,7 @@ def binary_analytics_table(
     metric_values: list[float],
     metrics_to_display: list[str],
     group_by: str,
-    cohorts_dict: dict,
+    cohort_dict: dict[str, tuple[Any]],
     *,
     title: str = None,
     per_context: bool = False,
@@ -428,8 +430,8 @@ def binary_analytics_table(
         List of performance metrics to include in the table.
     group_by : str
         The primary grouping category in the performance table. It could be "Score" or "Target".
-    cohorts_dict : dict
-        __description__
+    cohort_dict : dict[str, tuple[Any]]
+        dictionary of cohort columns and values used to subselect a population for evaluation.
     title : str, optional
         The title for the performance statistics table, by default None.
     per_context : bool, optional
@@ -440,6 +442,7 @@ def binary_analytics_table(
     HTML
         The HTML table for the fairness evaluation.
     """
+    sg = Seismogram()
     table_config = AnalyticsTableConfig(**COLORING_CONFIG_DEFAULT)
     performance_metrics = AnalyticsTable(
         score_columns=score_cols,
@@ -449,9 +452,10 @@ def binary_analytics_table(
         metrics_to_display=metrics_to_display,
         title=title or "Model Performance Statistics",
         top_level=group_by,
-        cohorts_dict=cohorts_dict,
+        cohort_dict=cohort_dict,
         table_config=table_config,
         per_context=per_context,
+        censor_threshold=sg.censor_threshold,
     )
     return performance_metrics.analytics_table()
 
@@ -475,7 +479,7 @@ class ExploreBinaryModelAnalytics(ExplorationWidget):
                 metric="Threshold",
                 metric_values=None,
                 metrics_to_display=None,
-                cohorts_dict=sg.available_cohort_groups,
+                cohort_dict=sg.available_cohort_groups,
                 title=title,
             ),
             plot_function=binary_analytics_table,
@@ -491,7 +495,7 @@ class ExploreBinaryModelAnalytics(ExplorationWidget):
             self.option_widget.metric_values,  # Updated to use metric_values
             list(self.option_widget.metrics_to_display),  # Updated to use metrics_to_display
             self.option_widget.group_by,  # Updated to use group_by
-            self.option_widget.cohorts_dict,
+            self.option_widget.cohort_dict,
         )
         kwargs = {"title": self.title, "per_context": self.option_widget.group_scores}
         return args, kwargs
@@ -509,7 +513,7 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
         model_options_widget=None,
         metric_values=None,
         metrics_to_display: Optional[tuple[str]] = None,
-        cohorts_dict: dict = None,
+        cohort_dict: Optional[dict[str, tuple[Any]]] = None,
         title: str = None,
     ):
         """
@@ -529,8 +533,8 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
             Metric values for which performance metric will be computed, by default None.
         metrics_to_display : Optional[tuple[str]]
             Metrics to include in the analytics table, by default None.
-        cohorts_dict : Optional[dict]
-            __description__
+        cohort_dict : Optional[dict[str, tuple[Any]]]
+            dictionary of cohort columns and values used to subselect a population for evaluation, by default None.
         title : Optional[str]
             Title of the widget, by default None.
         """
@@ -539,7 +543,7 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
         sg = Seismogram()
         self.model_options_widget = model_options_widget
         self.title = title
-        self.all_cohorts = cohorts_dict
+        self.all_cohort_groups = cohort_dict
 
         # Multiple select dropdowns for targets and scores
         self._target_cols = MultiselectDropdownWidget(
@@ -556,7 +560,8 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
             options=[THRESHOLD] + MONOTONIC_METRICS,
             value=metric,
             description="Metric",
-            style=WIDE_LABEL_STYLE,
+            style={"description_width": "40px"},
+            layout=Layout(width="calc(max(max-content, var(--jp-widgets-inline-width-short)))", min_width="200px"),
         )
         self._metrics_to_display = MultiselectDropdownWidget(
             options=[THRESHOLD] + STATNAMES + OVERALL_PERFORMANCE,
@@ -571,9 +576,10 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
             options=["Score", "Target"],
             value="Score",
             description="Group By",
-            style=WIDE_LABEL_STYLE,
+            style={"description_width": "60px"},
+            layout=Layout(width="calc(max(max-content, var(--jp-widgets-inline-width-short)))", min_width="200px"),
         )
-        self._cohorts_dict = MultiSelectionListWidget(cohorts_dict, title="Cohorts")
+        self._cohort_dict = MultiSelectionListWidget(cohort_dict, title="Cohort Filter")
         self.per_context_checkbox = _combine_scores_checkbox(per_context=False)
 
         self._target_cols.observe(self._on_value_changed, names="value")
@@ -583,7 +589,7 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
         self._metrics_to_display.observe(self._on_value_changed, names="value")
         self._group_by.observe(self._on_value_changed, names="value")
         self.per_context_checkbox.observe(self._on_value_changed, names="value")
-        self._cohorts_dict.observe(self._on_value_changed, names="value")
+        self._cohort_dict.observe(self._on_value_changed, names="value")
 
         v_children = [
             self._target_cols,
@@ -599,14 +605,25 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
             self.model_options_widget.observe(self._on_value_changed, names="value")
 
         grid_layout = Layout(
-            width="80%", grid_template_columns="repeat(3, 1fr)", justify_items="flex-end", grid_gap="10px"
+            width="100%", grid_template_columns="repeat(3, 1fr)", justify_items="flex-start", grid_gap="10px"
         )  # Three columns
 
         # Create a GridBox with the specified layout
         grid_box = GridBox(children=v_children, layout=grid_layout)
 
+        # Add title
+        grid_with_title = VBox(
+            children=[
+                html_title("Analytics Table Options"),
+                grid_box,
+            ],
+            layout=Layout(
+                align_items="flex-start",
+            ),
+        )
+
         super().__init__(
-            children=[self._cohorts_dict, html_title("Analytics Table Options"), grid_box],
+            children=[self._cohort_dict, grid_with_title],
             layout=BOX_GRID_LAYOUT,
         )
 
@@ -626,7 +643,7 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
         self._metric_values.disabled = value
         self._metrics_to_display.disabled = value
         self._group_by.disabled = value
-        self._cohorts_dict.disabled = value
+        self._cohort_dict.disabled = value
         self.per_context_checkbox.disabled = value
         if self.model_options_widget:
             self.model_options_widget.disabled = value
@@ -639,7 +656,7 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
             "metric_values": self._metric_values.value,
             "metrics_to_display": self._metrics_to_display.value,
             "group_by": self._group_by.value,
-            "cohorts_dict": self._cohorts_dict.value,
+            "cohort_dict": self._cohort_dict.value,
             "group_scores": self.per_context_checkbox.value,
         }
         if self.model_options_widget:
@@ -671,8 +688,8 @@ class AnalyticsTableOptionsWidget(VBox, traitlets.HasTraits):
         return self._group_by.value
 
     @property
-    def cohorts_dict(self):
-        return self._cohorts_dict.value or self.all_cohorts
+    def cohort_dict(self):
+        return self._cohort_dict.value or self.all_cohort_groups
 
     @property
     def group_scores(self):

@@ -1,5 +1,5 @@
 import itertools
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -125,7 +125,7 @@ def generate_analytics_data(
     metric_values: List[float],
     *,
     top_level: str = "Score",
-    cohorts_dict: Optional[dict] = None,
+    cohort_dict: Optional[dict[str, tuple[Any]]] = None,
     per_context: bool = False,
     metrics_to_display: Optional[List[str]] = None,
     decimals: int = 3,
@@ -146,8 +146,8 @@ def generate_analytics_data(
         A list of metric values for which corresponding statistics are calculated.
     top_level : str, optional
         The primary grouping category in the performance table, by default "Score".
-    cohorts_dict : Optional[dict], optional
-        __description__
+    cohort_dict : Optional[dict[str, tuple[Any]]], optional
+        dictionary of cohort columns and values used to subselect a population for evaluation, by default None.
     per_context : bool
         If scores should be grouped by context, by default False.
     metrics_to_display : Optional[List[str]], optional
@@ -155,6 +155,8 @@ def generate_analytics_data(
         in GENERATED_COLUMNS.
     decimals : int, optional
         The number of decimal places for rounding numerical results, by default 3.
+    censor_threshold : int, optional
+        Minimum rows required to generate analytics data, by default 10.
 
     Returns
     -------
@@ -169,7 +171,10 @@ def generate_analytics_data(
     )
     second_level = "Target" if top_level == "Score" else "Score"
     sg = Seismogram()
-    data = _get_cohorts_data(sg.dataframe, cohorts_dict)
+    cohort_dict = cohort_dict or sg.available_cohort_groups
+    cohort_filter = FilterRule.from_cohort_dictionary(cohort_dict)
+    cohort_filter.MIN_ROWS = censor_threshold
+    data = cohort_filter.filter(sg.dataframe)
     if len(data) <= censor_threshold:
         return None
     for first, second in product:
@@ -196,30 +201,5 @@ def generate_analytics_data(
         )
         rows_list.append(current_row)
     # Create a DataFrame from the rows data
-    data = pd.DataFrame(rows_list)
-    return data
-
-
-def _get_cohorts_data(dataframe, cohorts_dict):
-    """
-    Filters the dataframe according to the cohort provided in the cohorts_dict.
-
-    Parameters
-    ----------
-    dataframe : pd.DataFrame
-        The original dataframe to be filtered.
-    cohorts_dict : dict
-        A dictionary where keys are cohort names and values are lists of cohort classes.
-
-    Returns
-    -------
-    pd.DataFrame
-        The dataframe after considering only the specified cohorts.
-    """
-    if cohorts_dict is None:
-        return dataframe
-
-    for cohort_column in cohorts_dict:
-        cohort_filter = FilterRule.isin(cohort_column, cohorts_dict[cohort_column])
-        dataframe = cohort_filter.filter(dataframe)
-    return dataframe
+    analytics_data = pd.DataFrame(rows_list)
+    return analytics_data
