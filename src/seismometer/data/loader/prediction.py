@@ -166,7 +166,7 @@ def dictionary_types(config: ConfigProvider, dataframe: pd.DataFrame) -> pd.Data
     for col in dataframe.columns:
         if col in defined_types:
             try:
-                pdh.try_casting(dataframe, col, defined_types[col])
+                dataframe = pdh.try_casting(dataframe, col, defined_types[col])
             except ConfigurationError:
                 value_error_columns.append(col)
         else:

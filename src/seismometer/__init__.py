@@ -5,9 +5,10 @@ import importlib.metadata
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
+import polars as pl
 
 # API
 from seismometer.api import *
@@ -23,8 +24,8 @@ def run_startup(
     config_path: str | Path = None,
     output_path: str | Path = None,
     config_provider: Optional[ConfigProvider] = None,
-    predictions_frame: Optional[pd.DataFrame] = None,
-    events_frame: Optional[pd.DataFrame] = None,
+    predictions_frame: Optional[Union[pd.DataFrame, pl.DataFrame]] = None,
+    events_frame: Optional[Union[pd.DataFrame, pl.DataFrame]] = None,
     definitions: Optional[dict] = None,
     log_level: int = logging.WARN,
     reset: bool = False,
@@ -42,11 +43,11 @@ def run_startup(
         by default None.
     config_provider : Optional[ConfigProvider], optional
         An optional ConfigProvider instance to use instead of loading configuration from config_path, by default None.
-    predictions_frame : Optional[pd.DataFrame], optional
-        An optional DataFrame containing the fully loaded predictions data, by default None.
+    predictions_frame : Optional[Union[pd.DataFrame, pl.DataFrame]], optional
+        An optional DataFrame (pandas or Polars) containing the fully loaded predictions data, by default None.
         By default, when not specified here, these data will be loaded based on conifguration.
-    events_frame : Optional[pd.DataFrame], optional
-        An optional DataFrame containing the fully loaded events data, by default None.
+    events_frame : Optional[Union[pd.DataFrame, pl.DataFrame]], optional
+        An optional DataFrame (pandas or Polars) containing the fully loaded events data, by default None.
         By default, when not specified here, these data will be loaded based on conifguration.
     definitions : Optional[dict], optional
         A dictionary of definitions to use instead of loading those specified by configuration, by default None.

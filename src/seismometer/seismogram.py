@@ -1,9 +1,10 @@
 import json
 import logging
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
+import pandas as pd
 import polars as pl
 
 from seismometer.configuration import AggregationStrategies, ConfigProvider, MergeStrategies
@@ -102,7 +103,11 @@ class Seismogram(object, metaclass=Singleton):
         self.selected_cohort = (None, None)  # column, values
 
     def load_data(
-        self, *, predictions: Optional[pl.DataFrame] = None, events: Optional[pl.DataFrame] = None, reset: bool = False
+        self,
+        *,
+        predictions: Optional[Union[pd.DataFrame, pl.DataFrame]] = None,
+        events: Optional[Union[pd.DataFrame, pl.DataFrame]] = None,
+        reset: bool = False,
     ):
         """
         Loads the seismogram data.
@@ -112,11 +117,11 @@ class Seismogram(object, metaclass=Singleton):
 
         Parameters
         ----------
-        predictions : pl.DataFrame, optional
-            The fully prepared predictions dataframe, by default None.
+        predictions : Optional[Union[pd.DataFrame, pl.DataFrame]], optional
+            The fully prepared predictions dataframe (pandas or Polars), by default None.
             Uses this when specified, otherwise loads based on configuration.
-        events : pl.DataFrame, optional
-            The pre-loaded events dataframe, by default None.
+        events : Optional[Union[pd.DataFrame, pl.DataFrame]], optional
+            The pre-loaded events dataframe (pandas or Polars), by default None.
             Uses this when specified, otherwise loads based on configuration.
         reset : bool, optional
             Flag when set to true will overwrite existing dataframe, by default False

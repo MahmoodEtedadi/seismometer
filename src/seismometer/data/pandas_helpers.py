@@ -1,8 +1,9 @@
 import logging
+import warnings
 from numbers import Number
 from typing import Optional, get_args
 
-import pandas as pd  # Only for legacy/unused merge functions - should be deprecated
+import pandas as pd  # Only for backward compatibility with pandas DataFrames in _ensure_polars() and type checking
 import polars as pl
 
 from seismometer.configuration import ConfigurationError
@@ -99,6 +100,12 @@ def merge_windowed_event(
     ValueError
         At least one column in pks must be in both the predictions and events dataframes.
     """
+    # Handle test compatibility - detect input type and return same type
+    input_is_pandas = isinstance(predictions, pd.DataFrame)
+    original_predictions_pandas = predictions if input_is_pandas else None
+    predictions = _ensure_polars(predictions)
+    events = _ensure_polars(events)
+
     # Validate merge strategy
     if merge_strategy not in get_args(MergeStrategies):
         raise ValueError(
@@ -108,32 +115,46 @@ def merge_windowed_event(
 
     # Validate and resolve
     r_ref = "~~reftime~~"
-    pks = [col for col in pks if col in events and col in predictions]  # Ensure existence in both frames
+    pks = [
+        col for col in pks if col in events.columns and col in predictions.columns
+    ]  # Ensure existence in both frames
     if len(pks) == 0:
         raise ValueError("No common keys found between predictions and events.")
 
-    min_offset = pd.Timedelta(min_leadtime_hrs, unit="hr")
+    min_offset = pl.duration(hours=min_leadtime_hrs)
 
     if sort:
-        predictions.sort_values(predtime_col, kind="mergesort", inplace=True)
-        events.sort_values(event_base_time_col, kind="mergesort", inplace=True)
+        predictions = predictions.sort(predtime_col, maintain_order=True)
+        events = events.sort(event_base_time_col, maintain_order=True)
 
     # Preprocess events : reduce and rename
     one_event = _one_event(events, event_label, event_base_val_col, event_base_time_col, pks)
-    if len(one_event.index) == 0:
+    if len(one_event) == 0:
         logger.debug(f"No events found for {event_label} with keys {pks}.")
+        if input_is_pandas:
+            # Simulate pandas inplace=True behavior by updating original DataFrame
+            result_pandas = predictions.to_pandas()
+            # Update existing columns (sorting may have changed order)
+            for col in result_pandas.columns:
+                original_predictions_pandas[col] = result_pandas[col].values
+            return original_predictions_pandas
         return predictions
 
     event_time_col = event_time(event_label)
     event_val_col = event_value(event_label)
-    one_event[r_ref] = one_event[event_time_col] - min_offset
+    # Add r_ref column (only if event_time_col is datetime type)
+    if one_event.schema[event_time_col] in [pl.Datetime, pl.Datetime("ms"), pl.Datetime("us"), pl.Datetime("ns")]:
+        one_event = one_event.with_columns((pl.col(event_time_col) - min_offset).alias(r_ref))
+    else:
+        # If not datetime (e.g., all nulls), just copy the time column
+        one_event = one_event.with_columns(pl.col(event_time_col).alias(r_ref))
 
     # When merging counts we want to apply the windowing BEFORE the merge.
     # So this case is handled separately due to needing some additional arguments.
     if merge_strategy == "count":
         # Immediately return the merged frame with the counts to avoid unnecessary processing.
         logger.debug(f"Merging event counts for {event_label} with columns {pks}.")
-        return _merge_event_counts(
+        result = _merge_event_counts(
             predictions,
             one_event,
             pks,
@@ -144,6 +165,14 @@ def merge_windowed_event(
             l_ref=predtime_col,
             r_ref=r_ref,
         )
+        # Convert back to pandas if input was pandas
+        if input_is_pandas:
+            result_pandas = result.to_pandas() if not isinstance(result, pd.DataFrame) else result
+            # Update existing columns and add new ones
+            for col in result_pandas.columns:
+                original_predictions_pandas[col] = result_pandas[col].values
+            return original_predictions_pandas
+        return result
 
     # merge event specified by merge_strategy for each prediction
     event_ref = event_time_col if merge_strategy in ["forward", "nearest"] else r_ref
@@ -164,13 +193,19 @@ def merge_windowed_event(
     logger.debug(f"Starting post-processing of events for {event_label}. There are {len(predictions)} predictions.")
     if window_hrs is not None:  # Clear out events outside window
         logger.debug(f"Filtering out events outside of the {window_hrs} hour window.")
-        max_lookback = pd.Timedelta(window_hrs, unit="hr")  # r_ref has already been moved by min_offset.
-        filter_map = (predictions[predtime_col] < (predictions[r_ref] - max_lookback)) | (
-            predictions[predtime_col] > (predictions[r_ref])
+        max_lookback = pl.duration(hours=window_hrs)  # r_ref has already been moved by min_offset.
+        filter_condition = (pl.col(predtime_col) < (pl.col(r_ref) - max_lookback)) | (
+            pl.col(predtime_col) > pl.col(r_ref)
         )
-        predictions.loc[filter_map, [event_val_col, event_time_col]] = pd.NA
-        # Log how many event values were changed after filtering
-        changed_count = filter_map.sum()
+        # Count how many will be filtered before applying
+        changed_count = predictions.select(filter_condition.sum()).item()
+        # Apply filter by setting values to null
+        predictions = predictions.with_columns(
+            [
+                pl.when(filter_condition).then(None).otherwise(pl.col(event_val_col)).alias(event_val_col),
+                pl.when(filter_condition).then(None).otherwise(pl.col(event_time_col)).alias(event_time_col),
+            ]
+        )
         logger.debug(f"Filtered out {changed_count} event values for {event_label} outside the window.")
 
     predictions = post_process_event(
@@ -182,14 +217,23 @@ def merge_windowed_event(
         impute_val_no_time=impute_val_no_time,
     )
     event_val_col = event_value(event_label)
-    if logger.isEnabledFor(logging.INFO) and event_val_col in predictions:
-        added_events_count = predictions[event_val_col].eq(1).sum()
+    if logger.isEnabledFor(logging.INFO) and event_val_col in predictions.columns:
+        added_events_count = predictions.select((pl.col(event_val_col) == 1).sum()).item()
         logger.info(
             f"Kept {added_events_count} events (value=1) for {event_label} after applying specified lookback window "
             f"of {window_hrs} hours and offset of {min_leadtime_hrs}."
         )
 
-    return predictions.drop(columns=r_ref)
+    predictions = predictions.drop(r_ref)
+    # Return pandas if input was pandas (for test compatibility)
+    if input_is_pandas:
+        # Simulate pandas inplace=True behavior by updating original DataFrame
+        result_pandas = predictions.to_pandas()
+        # Update existing columns and add new ones
+        for col in result_pandas.columns:
+            original_predictions_pandas[col] = result_pandas[col].values
+        return original_predictions_pandas
+    return predictions
 
 
 def _one_event(
@@ -197,11 +241,16 @@ def _one_event(
 ) -> pl.DataFrame:
     """Reduces the events dataframe to those rows associated with the event_label, preemptively renaming to the
     columns to what a join should use and reducing columns to pks + event value and time."""
+    # Handle test compatibility - detect input type and return same type
+    input_is_pandas = isinstance(events, pd.DataFrame)
+    events = _ensure_polars(events)
     expected_columns = pks + [event_base_val_col, event_base_time_col]
-    one_event = events.loc[events.Type == event_label, expected_columns][expected_columns]
-    return one_event.rename(
-        columns={event_base_time_col: event_time(event_label), event_base_val_col: event_value(event_label)}
+    one_event = events.filter(pl.col("Type") == event_label).select(expected_columns)
+    one_event = one_event.rename(
+        {event_base_time_col: event_time(event_label), event_base_val_col: event_value(event_label)}
     )
+    # Return pandas if input was pandas (for test compatibility)
+    return one_event.to_pandas() if input_is_pandas else one_event
 
 
 def post_process_event(
@@ -240,45 +289,60 @@ def post_process_event(
     pl.DataFrame
         The dataframe with potentially modified labels.
     """
+    # Handle test compatibility - detect input type and return same type
+    input_is_pandas = isinstance(dataframe, pd.DataFrame)
+    dataframe = _ensure_polars(dataframe)
+
     logger.debug(f"Post-processing events for {label_col} and {time_col}.")
     if label_col not in dataframe.columns or time_col not in dataframe.columns:
         logger.debug(f"Columns {label_col} or {time_col} not found in dataframe, skipping post-processing for events.")
-        return dataframe
+        return dataframe.to_pandas() if input_is_pandas else dataframe
 
-    # use pandas for compatibility of imputations -- handle Nones
-    impute_val = pd.Series(
-        [impute_val_no_time or 0, impute_val_with_time or 1],
-        dtype=dataframe[label_col].dtype,
-        index=["no_time", "with_time"],
-    )
+    # Store original null state for logging
+    label_was_null = pl.col(label_col).is_null()
+    time_is_not_null = pl.col(time_col).is_not_null()
 
-    label_na_map = dataframe[label_col].isna()
-    time_na_map = dataframe[time_col].isna()
+    # Use polars for imputation - handle Nones
+    impute_with = impute_val_with_time if impute_val_with_time is not None else 1
+    impute_without = impute_val_no_time if impute_val_no_time is not None else 0
 
-    if impute_val_with_time is not None:
-        dataframe.loc[(label_na_map & ~time_na_map), label_col] = impute_val.with_time
-    if impute_val_no_time is not None:
-        dataframe.loc[dataframe[label_col].isna(), label_col] = impute_val.no_time
+    # Apply imputation logic using with_columns
+    if impute_val_with_time is not None or impute_val_no_time is not None:
+        dataframe = dataframe.with_columns(
+            pl.when(label_was_null & time_is_not_null)
+            .then(pl.lit(impute_with))
+            .when(label_was_null)
+            .then(pl.lit(impute_without))
+            .otherwise(pl.col(label_col))
+            .alias(label_col)
+        )
 
     if column_dtype is None:
-        return dataframe
+        return dataframe.to_pandas() if input_is_pandas else dataframe
 
     # cast after imputation - supports nonnullable types
-    try_casting(dataframe, label_col, column_dtype)
+    dataframe = try_casting(dataframe, label_col, column_dtype)
 
     # Log how many rows were imputed/changed
-    imputed_with_time = ((label_na_map & ~time_na_map) & dataframe[label_col].notna()).sum()
-    imputed_no_time = (dataframe[label_col].isna()).sum()
+    imputed_with_time = dataframe.select(
+        (label_was_null & time_is_not_null & pl.col(label_col).is_not_null()).sum()
+    ).item()
+    imputed_no_time = dataframe.select(pl.col(label_col).is_null().sum()).item()
     logger.debug(
         f"Post-processing of events for {label_col} and {time_col} complete. "
         f"Imputed {imputed_with_time} rows with time, {imputed_no_time} rows with no time."
     )
-    return dataframe
+
+    # Return pandas if input was pandas (for test compatibility)
+    return dataframe.to_pandas() if input_is_pandas else dataframe
 
 
-def try_casting(dataframe: pl.DataFrame, column: str, column_dtype: str) -> None:
+def try_casting(dataframe: pl.DataFrame, column: str, column_dtype: str) -> pl.DataFrame:
     """
-    Attempts to cast a column to a specified data type inplace.
+    Attempts to cast a column to a specified data type.
+
+    For pandas DataFrames, modifies in place for backward compatibility.
+    For polars DataFrames, returns a new DataFrame.
 
     Will convert the specified column to a data type, raising a ConfigurationError if the conversion fails.
     Does multistep casts to get strings "1.0" into format int 1.
@@ -292,16 +356,57 @@ def try_casting(dataframe: pl.DataFrame, column: str, column_dtype: str) -> None
     column_dtype : str
         The data type to cast the column to.
 
+    Returns
+    -------
+    pl.DataFrame
+        The dataframe with the casted column (new DataFrame for polars, modified in-place for pandas).
+
     Raises
     ------
     ConfigurationError
         If the column cannot be cast to the specified data type.
     """
+    # Handle pandas DataFrames directly with pandas operations
+    if isinstance(dataframe, pd.DataFrame):
+        try:
+            if "int" in column_dtype.lower():  # "1.0" -> 1.0 then 1.0 -> 1
+                dataframe[column] = dataframe[column].astype(float)
+            dataframe[column] = dataframe[column].astype(column_dtype)
+            return dataframe
+        except (ValueError, TypeError) as exc:
+            raise ConfigurationError(
+                f"Cannot cast '{event_name(column)}' values to '{column_dtype}'. "
+                + "Update dictionary config or contact the model owner."
+            ) from exc
+
+    # Handle polars DataFrames
     try:
-        if "int" in column_dtype.lower():  # "1.0" -> 1.0 then 1.0 -> 1
-            dataframe[column] = dataframe[column].astype(float)
-        dataframe[column] = dataframe[column].astype(column_dtype)
-    except (ValueError, TypeError) as exc:
+        # Convert string dtype to polars dtype
+        dtype_map = {
+            "float": pl.Float64,
+            "float64": pl.Float64,
+            "float32": pl.Float32,
+            "int": pl.Int64,
+            "int64": pl.Int64,
+            "int32": pl.Int32,
+            "int16": pl.Int16,
+            "int8": pl.Int8,
+            "string": pl.String,
+            "str": pl.String,
+            "object": pl.String,
+            "bool": pl.Boolean,
+            "Int64": pl.Int64,  # Pandas nullable Int64
+        }
+        polars_dtype = (
+            dtype_map.get(column_dtype.lower(), column_dtype) if isinstance(column_dtype, str) else column_dtype
+        )
+
+        if isinstance(column_dtype, str) and "int" in column_dtype.lower():  # "1.0" -> 1.0 then 1.0 -> 1
+            dataframe = dataframe.with_columns(pl.col(column).cast(pl.Float64))
+        dataframe = dataframe.with_columns(pl.col(column).cast(polars_dtype))
+
+        return dataframe
+    except (ValueError, TypeError, pl.exceptions.ComputeError, pl.exceptions.InvalidOperationError) as exc:
         raise ConfigurationError(
             f"Cannot cast '{event_name(column)}' values to '{column_dtype}'. "
             + "Update dictionary config or contact the model owner."
@@ -315,13 +420,24 @@ def _merge_event_counts(
     event_name: str,
     event_label: str,
     window_hrs: Optional[Number] = None,
-    min_offset: pd.Timedelta = pd.Timedelta(0, unit="hr"),
+    min_offset: pl.Duration = pl.duration(hours=0),
     l_ref: str = "Time",
     r_ref: str = "~~reftime~~",
 ) -> pl.DataFrame:
     """Creates a new column for each event in the right frame's event_label column,
     counting the number of times that event has occurred"""
+    # Handle test compatibility - detect input type and return same type
+    input_is_pandas = isinstance(left, pd.DataFrame)
+    left = _ensure_polars(left)
+    right = _ensure_polars(right)
     logger.debug(f"Merging event counts for {event_name} with columns {pks}.")
+
+    # Validate and convert min_offset type
+    if isinstance(min_offset, pd.Timedelta):
+        # Convert pandas Timedelta to polars Duration
+        min_offset = pl.duration(microseconds=min_offset.total_seconds() * 1_000_000)
+    elif not isinstance(min_offset, (pl.Duration, pl.Expr)):
+        raise TypeError(f"min_offset must be a Timedelta or Duration, not {type(min_offset).__name__}")
 
     if l_ref == r_ref:
         raise ValueError(
@@ -330,51 +446,56 @@ def _merge_event_counts(
 
     if window_hrs is not None:
         # Filter out rows with missing times if checking window hours
-        if len(right_filtered := right[right[r_ref].notna()]) == 0:
+        right_filtered = right.filter(pl.col(r_ref).is_not_null())
+        if len(right_filtered) == 0:
             logger.warning(f"No times found for {event_name}! Unable to merge any counts.")
-            return left
+            return left.to_pandas() if input_is_pandas else left
         if (diff := len(right) - len(right_filtered)) > 0:
             logger.warning(f"Found {diff} rows with missing times for {event_name}. These rows will be ignored.")
             right = right_filtered
 
-        max_lookback = pd.Timedelta(window_hrs, unit="hr") + min_offset  # Keep window the specified size
-        right = pd.merge(right, left[pks + [l_ref]], on=pks, how="left")
-        right = right[right[l_ref] <= right[r_ref]]  # Filter to only events that happened at or after the prediction
-        right = right[
-            right[l_ref] > (right[r_ref] - max_lookback)
-        ]  # Filter to only events that happened within the window
+        max_lookback = pl.duration(hours=window_hrs) + min_offset  # Keep window the specified size
+        right = right.join(left.select(pks + [l_ref]), on=pks, how="left")
+        right = right.filter(
+            pl.col(l_ref) <= pl.col(r_ref)
+        )  # Filter to only events that happened at or after the prediction
+        right = right.filter(
+            pl.col(l_ref) > (pl.col(r_ref) - max_lookback)
+        )  # Filter to only events that happened within the window
 
     # Validate number of categories to create columns for
-    pop_counts = right[event_label].value_counts()
+    pop_counts = right.group_by(event_label).agg(pl.len().alias("count")).sort("count", descending=True)
     if (N := len(pop_counts)) > MAXIMUM_COUNT_CATS:
         logger.warning(
             f"Maximum number of unique events to count is {MAXIMUM_COUNT_CATS}, but {N} were found for {event_name}. "
             + f"Only the top {MAXIMUM_COUNT_CATS} by number of appearances will be included."
         )
         # Filter right frame to the only contain the top MAXIMUM_COUNT_CATS events
-        events_to_count = pop_counts.iloc[:MAXIMUM_COUNT_CATS].keys()
-        right = right[right[event_label].isin(events_to_count)]
-    del pop_counts
+        events_to_count = pop_counts.head(MAXIMUM_COUNT_CATS).select(event_label).to_series()
+        right = right.filter(pl.col(event_label).is_in(events_to_count))
 
     event_name_map = {
-        event: event_value_count(str(event_label), str(event)) for event in right[event_label].unique()
-    }  # Create dictionary to map column names with
+        str(event): event_value_count(str(event_label), str(event))
+        for event in right.select(event_label).unique().to_series()
+    }  # Create dictionary to map column names with - ensure keys are strings for polars rename
 
     # Create a value counts dataframe where each event is a column containing the count of that
     # event grouped by the primary keys.
-    val_counts: pl.DataFrame = right.groupby(pks, as_index=False)[event_label].value_counts()
     val_counts = (
-        val_counts.pivot(index=pks, columns=event_label, values="count")
-        .reset_index()
-        .fillna(0)
-        .rename(columns=event_name_map)
+        right.group_by(pks + [event_label])
+        .agg(pl.len().alias("count"))
+        .pivot(index=pks, on=event_label, values="count")
+        .fill_null(0)
+        .rename(event_name_map)
     )
 
-    left = pd.merge(left, val_counts, on=pks, how="left")  # Merge counts into left frame
+    left = left.join(val_counts, on=pks, how="left")  # Merge counts into left frame
     count_cols = list(event_name_map.values())
-    left[count_cols] = left[count_cols].fillna(0)  # Fill any missing counts for rows that didn't have any events
+    # Fill any missing counts for rows that didn't have any events
+    left = left.with_columns([pl.col(col).fill_null(0) for col in count_cols])
 
-    return left
+    # Return pandas if input was pandas (for test compatibility)
+    return left.to_pandas() if input_is_pandas else left
 
 
 def _merge_with_strategy(
@@ -412,53 +533,67 @@ def _merge_with_strategy(
     pl.DataFrame
         The merged dataframe.
     """
+    # Handle test compatibility - detect input type and return same type
+    input_is_pandas = isinstance(predictions, pd.DataFrame)
+    predictions = _ensure_polars(predictions)
+    one_event = _ensure_polars(one_event)
     try:
-        ct_times = one_event[event_ref].notna().sum()
+        ct_times = one_event.select(pl.col(event_ref).is_not_null().sum()).item()
 
         # If there are no times in the event frame, merge the first row for each group
         if ct_times == 0:
             # Set the filtered frame to the first row for each group and throw a value error
             # which is passed before merging.
-            one_event_filtered = one_event.groupby(pks).first()
+            one_event_filtered = one_event.unique(subset=pks, keep="first")
             raise ValueError(f"No times found for {event_display}, merging first row for each group.")
 
-        if ct_times != len(one_event.index):
+        if ct_times != len(one_event):
             logger.warning(f"Inconsistent event times for {event_display}, only considering events with times.")
-            one_event = one_event.dropna(subset=[event_ref])
+            one_event = one_event.filter(pl.col(event_ref).is_not_null())
 
         if merge_strategy == "forward" or merge_strategy == "nearest":
-            predictions_with_events = pd.merge_asof(
-                predictions,
-                one_event.dropna(subset=[event_ref]),
-                left_on=pred_ref,
-                right_on=event_ref,
-                by=pks,
-                direction=merge_strategy,
-            )
+            # Ensure both frames are sorted for join_asof
+            one_event_filtered = one_event.filter(pl.col(event_ref).is_not_null())
+            # Suppress polars warning about sortedness when 'by' groups are used
+            # We know the data is sorted (sorted at beginning of merge_windowed_event)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message="Sortedness of columns cannot be checked when 'by' groups provided"
+                )
+                predictions_with_events = predictions.join_asof(
+                    one_event_filtered,
+                    left_on=pred_ref,
+                    right_on=event_ref,
+                    by=pks,
+                    strategy=merge_strategy,
+                )
             event_val_col = event_value(event_display)
-            if logger.isEnabledFor(logging.INFO) and event_val_col in predictions_with_events:
-                added_events_count = predictions_with_events[event_val_col].eq(1).sum()
+            if logger.isEnabledFor(logging.INFO) and event_val_col in predictions_with_events.columns:
+                added_events_count = predictions_with_events.select((pl.col(event_val_col) == 1).sum()).item()
                 logger.info(f"Added {added_events_count} events (value=1) for {event_display}.")
 
             logger.debug(
                 f"Merged {event_display} using {merge_strategy} strategy on {pred_ref} and {event_ref} with "
                 f"keys {pks}. There are {len(predictions_with_events)} predictions."
             )
-            return predictions_with_events
+            # Return pandas if input was pandas (for test compatibility)
+            return predictions_with_events.to_pandas() if input_is_pandas else predictions_with_events
 
         # Assume sorted on event_ref before being passed in
         if merge_strategy == "first":
             logger.debug(f"Updating events to only keep the first occurrence for each {event_display}.")
-            one_event_filtered = one_event.groupby(pks).first().reset_index()
+            one_event_filtered = one_event.unique(subset=pks, keep="first")
         if merge_strategy == "last":
             logger.debug(f"Updating events to only keep the last occurrence for each {event_display}.")
-            one_event_filtered = one_event.groupby(pks).last().reset_index()
+            one_event_filtered = one_event.unique(subset=pks, keep="last")
 
     except ValueError as e:
         logger.warning(e)
         pass
 
-    return pd.merge(predictions, one_event_filtered, on=pks, how="left")
+    result = predictions.join(one_event_filtered, on=pks, how="left")
+    # Return pandas if input was pandas (for test compatibility)
+    return result.to_pandas() if input_is_pandas else result
 
 
 def max_aggregation(df: pl.DataFrame, pks: list[str], score: str, ref_time: str, ref_event: str) -> pl.DataFrame:

@@ -87,14 +87,14 @@ def score_target_cohort_summaries(
     pl.DataFrame
         A dataframe of summary counts.
     """
-    import pandas as pd
-
     from seismometer.seismogram import Seismogram
 
     sg = Seismogram()
 
     # Handle pandas Series in groupby_groups (e.g., from pd.cut)
     # Convert them to Polars columns and add them to the dataframe
+    import pandas as pd
+
     temp_cols = {}
     group_col_names = []
     temp_to_grab_mapping = {}  # Map temp column names to their corresponding grab_groups names

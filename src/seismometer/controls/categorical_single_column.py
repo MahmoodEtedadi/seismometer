@@ -4,7 +4,6 @@ from typing import Optional
 import traitlets
 from IPython.display import HTML
 from ipywidgets import Box, Dropdown, Layout, ValueWidget, VBox
-from pandas import isna
 
 from seismometer.controls.decorators import disk_cached_html_segment
 from seismometer.controls.explore import ExplorationWidget
@@ -65,13 +64,18 @@ class OrdinalCategoricalSinglePlot:
         """
         Extracts the unique metric values for the provided metric column.
         """
+        import math
+
         sg = Seismogram()
         if self.metric_col in sg.metrics:
             values = sg.metrics[self.metric_col].metric_details.values
         if values:
             return values
         values = sorted(self.dataframe[self.metric_col].unique())
-        values = [value for value in values if not isna(value)]
+        # Filter out None and NaN values
+        values = [
+            value for value in values if value is not None and not (isinstance(value, float) and math.isnan(value))
+        ]
         logger.warning(
             f"Metric values for metric {self.metric_col} are not provided. "
             + f"Using values from the corresponding dataframe column: {values}."

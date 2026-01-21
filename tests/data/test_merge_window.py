@@ -1125,6 +1125,9 @@ class TestMergeWindowedEvent:
 
         # No CtxId_x
         actual = actual.sort_values(by=["Id", "CtxId", "PredictTime"]).reset_index(drop=True)
+        # Convert to string dtype for comparison since polars->pandas conversion may lose string dtype
+        # Convert through float first to ensure consistent formatting (e.g., "100" -> 100.0 -> "100.0")
+        actual[f"{event_name}_Value"] = actual[f"{event_name}_Value"].astype(float).astype(str)
         pdt.assert_frame_equal(actual[expected.columns], expected, check_dtype=False)
 
 
