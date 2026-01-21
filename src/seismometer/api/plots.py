@@ -2,7 +2,7 @@ import logging
 from typing import Any, Optional
 
 import numpy as np
-import pandas as pd
+import polars as pl
 from IPython.display import HTML, SVG
 
 import seismometer.plot as plot
@@ -65,7 +65,7 @@ def plot_cohort_group_histograms(cohort_col: str, subgroups: list[str], target_c
 
 @disk_cached_html_segment
 def _plot_cohort_hist(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     target: str,
     output: str,
     cohort_col: str,
@@ -102,11 +102,11 @@ def _plot_cohort_hist(
     cData = get_cohort_data(dataframe, cohort_col, proba=output, true=target, splits=subgroups)
 
     # filter by groups by size
-    cCount = cData["cohort"].value_counts()
-    good_groups = cCount.loc[cCount > censor_threshold].index
-    cData = cData.loc[cData["cohort"].isin(good_groups)]
+    cCount = cData.group_by("cohort").agg(pl.len().alias("count"))
+    good_groups = cCount.filter(pl.col("count") > censor_threshold)["cohort"].to_list()
+    cData = cData.filter(pl.col("cohort").is_in(good_groups))
 
-    if len(cData.index) == 0:
+    if cData.height == 0:
         return template.render_censored_plot_message(censor_threshold)
 
     bin_count = 20
@@ -216,7 +216,7 @@ def plot_cohort_lead_time(
 
 @disk_cached_html_segment
 def _plot_leadtime_enc(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     entity_keys: list[str],
     target_event: str,
     target_zero: str,
@@ -272,44 +272,46 @@ def _plot_leadtime_enc(
         logger.error(f"Target event time-zero ({target_zero}) not found in dataset. Cannot plot leadtime.")
         return
 
-    summary_data = dataframe[dataframe[target_event] == 1]
-    if len(summary_data.index) == 0:
+    summary_data = dataframe.filter(pl.col(target_event) == 1)
+    if summary_data.height == 0:
         logger.error(f"No positive events ({target_event}=1) were found")
         return
 
-    cohort_mask = summary_data[cohort_col].isin(subgroups)
-    threshold_mask = summary_data[score] > threshold
+    cohort_mask = pl.col(cohort_col).is_in(subgroups)
+    threshold_mask = pl.col(score) > threshold
 
     # summarize to first score
     summary_data = pdh.event_score(
-        summary_data[cohort_mask & threshold_mask],
+        summary_data.filter(cohort_mask & threshold_mask),
         entity_keys,
         score=score,
         ref_time=target_zero,
         aggregation_method="first",
     )
-    if summary_data is not None and len(summary_data) > censor_threshold:
-        summary_data = summary_data[[target_zero, ref_time, cohort_col]]
+    if summary_data is not None and summary_data.height > censor_threshold:
+        summary_data = summary_data.select([target_zero, ref_time, cohort_col])
     else:
         return template.render_censored_plot_message(censor_threshold)
 
     # filter by group size
-    counts = summary_data[cohort_col].value_counts()
-    good_groups = counts.loc[counts > censor_threshold].index
-    summary_data = summary_data.loc[summary_data[cohort_col].isin(good_groups)]
+    counts = summary_data.group_by(cohort_col).agg(pl.len().alias("count"))
+    good_groups = counts.filter(pl.col("count") > censor_threshold)[cohort_col].to_list()
+    summary_data = summary_data.filter(pl.col(cohort_col).is_in(good_groups))
 
     metric_apis.log_quantiles(
         summary_data, "Time Lead", score, target_zero, ref_time, cohort_col, good_groups, threshold
     )
 
-    if len(summary_data.index) == 0:
+    if summary_data.height == 0:
         return template.render_censored_plot_message(censor_threshold)
 
     # Truncate to minute but plot hour
-    summary_data[x_label] = (summary_data[ref_time] - summary_data[target_zero]).dt.total_seconds() // 60 / 60
+    summary_data = summary_data.with_columns(
+        ((pl.col(ref_time) - pl.col(target_zero)).dt.total_seconds() // 60 / 60).alias(x_label)
+    )
 
     title = f'Lead Time from {score.replace("_", " ")} to {(target_zero).replace("_", " ")}'
-    rows = summary_data[cohort_col].nunique()
+    rows = summary_data[cohort_col].n_unique()
     svg = plot.leadtime_violin(summary_data, x_label, cohort_col, xmax=max_hours, figsize=(9, 1 + rows))
     return template.render_title_with_image(title, svg)
 
@@ -366,7 +368,7 @@ def plot_cohort_evaluation(
 
 @disk_cached_html_segment
 def _plot_cohort_evaluation(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     entity_keys: list[str],
     target: str,
     output: str,
@@ -508,7 +510,7 @@ def plot_model_evaluation(
 
 @disk_cached_html_segment
 def _model_evaluation(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     entity_keys: list[str],
     target_event: str,
     target: str,
@@ -570,12 +572,16 @@ def _model_evaluation(
     logger.info(
         f"After validation (non-null values for {score_col} and 0,1 values for {target}), data has {len(data)} rows."
     )
-    if len(data.index) < censor_threshold:
+    if data.height < censor_threshold:
         return template.render_censored_plot_message(censor_threshold)
-    if (lcount := data[target].nunique()) != 2:
+    if (lcount := data[target].n_unique()) != 2:
         return template.render_title_message(
             "Evaluation Error", f"Model Evaluation requires exactly two classes but found {lcount}"
         )
+    # Convert to pandas for sklearn compatibility
+    if isinstance(data, pl.DataFrame):
+        data = data.to_pandas()
+
     logger.info(f"Final data before calculating stats has {len(data)} rows.")
     keep = ~(np.isnan(data[target]) | np.isnan(data[score_col]))
     logger.info(f"Calculating stats drops {len(data)-len(data[target][keep])} rows.")
@@ -678,7 +684,7 @@ def plot_intervention_outcome_timeseries(
 
 @disk_cached_html_segment
 def _plot_trend_intervention_outcome(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     entity_keys: list[str],
     cohort_col: str,
     subgroups: list[str],
@@ -762,7 +768,7 @@ def _plot_trend_intervention_outcome(
 
 
 def _plot_ts_cohort(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     entity_keys: list[str],
     event_col: str,
     cohort_col: str,
@@ -815,9 +821,9 @@ def _plot_ts_cohort(
 
     keep_columns = [cohort_col, reftime, event_col]
 
-    cohort_msk = dataframe[cohort_col].isin(subgroups)
+    cohort_msk = dataframe[cohort_col].is_in(subgroups)  # Polars uses .is_in()
     plotdata = create_metric_timeseries(
-        dataframe[cohort_msk][entity_keys + keep_columns],
+        dataframe.filter(cohort_msk).select(entity_keys + keep_columns),
         reftime,
         event_col,
         entity_keys,
@@ -827,17 +833,17 @@ def _plot_ts_cohort(
         censor_threshold=censor_threshold,
     )
 
-    if plotdata.empty:
+    if plotdata.height == 0:  # Polars uses .height instead of .empty
         # all groups have been censored.
         return template.render_censored_plot_message(censor_threshold)
 
     counts = None
     if plot_counts:
-        counts = plotdata.groupby([reftime, cohort_col]).count()
+        counts = plotdata.group_by([reftime, cohort_col]).count()
 
     if ylabel is None:
         ylabel = pdh.event_name(event_col)
-    plotdata = plotdata.rename(columns={event_col: ylabel})
+    plotdata = plotdata.rename({event_col: ylabel})
 
     # plot
     return plot.compare_series(
@@ -889,14 +895,14 @@ def plot_model_score_comparison(
         if per_context:
             one_score_data = pdh.event_score(
                 dataframe, sg.entity_keys, score=score, ref_event=target_event, aggregation_method="max"
-            )[[score, target_event]]
+            ).select([score, target_event])
         else:
-            one_score_data = dataframe[[score, target_event]].copy()
-        one_score_data["ScoreName"] = score
-        one_score_data.rename(columns={score: "Score"}, inplace=True)
+            one_score_data = dataframe.select([score, target_event]).clone()
+        one_score_data = one_score_data.with_columns(pl.lit(score).alias("ScoreName"))
+        one_score_data = one_score_data.rename({score: "Score"})
         data.append(one_score_data)
-    data = pd.concat(data, axis=0, ignore_index=True)
-    data["ScoreName"] = data["ScoreName"].astype("category")
+    data = pl.concat(data)
+    data = data.with_columns(pl.col("ScoreName").cast(pl.Categorical))
 
     plot_data = get_cohort_performance_data(
         data,
@@ -956,14 +962,14 @@ def plot_model_target_comparison(
         if per_context:
             one_score_data = pdh.event_score(
                 dataframe, sg.entity_keys, score=score, ref_event=target_event, aggregation_method="max"
-            )[[score, target_event]]
+            ).select([score, target_event])
         else:
-            one_score_data = dataframe[[score, target_event]].copy()
-        one_score_data["TargetName"] = target
-        one_score_data.rename(columns={target_event: "Target"}, inplace=True)
+            one_score_data = dataframe.select([score, target_event]).clone()
+        one_score_data = one_score_data.with_columns(pl.lit(target).alias("TargetName"))
+        one_score_data = one_score_data.rename({target_event: "Target"})
         data.append(one_score_data)
-    data = pd.concat(data, axis=0, ignore_index=True)
-    data["TargetName"] = data["TargetName"].astype("category")
+    data = pl.concat(data)
+    data = data.with_columns(pl.col("TargetName").cast(pl.Categorical))
 
     plot_data = get_cohort_performance_data(
         data,
@@ -1075,7 +1081,7 @@ def _autometric_plot_binary_classifier_metrics(
 def binary_classifier_metric_evaluation(
     metric_generator: BinaryClassifierMetricGenerator,
     metrics: str | list[str],
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     entity_keys: list[str],
     target: str,
     score_col: str,
@@ -1127,9 +1133,9 @@ def binary_classifier_metric_evaluation(
     # Validate
     requirements = FilterRule.isin(target, (0, 1)) & FilterRule.notna(score_col)
     data = requirements.filter(data)
-    if len(data.index) < censor_threshold:
+    if data.height < censor_threshold:
         return template.render_censored_plot_message(censor_threshold)
-    if (lcount := data[target].nunique()) != 2:
+    if (lcount := data[target].n_unique()) != 2:
         return template.render_title_message(
             "Evaluation Error", f"Model Evaluation requires exactly two classes but found {lcount}"
         )

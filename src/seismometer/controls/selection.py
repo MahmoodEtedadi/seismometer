@@ -146,7 +146,7 @@ class HierarchicalSelectionWidget(VBox):
         self,
         options: dict[str, tuple],
         hierarchy: CohortHierarchy,
-        combinations: "pd.DataFrame",
+        combinations,  # Union[pd.DataFrame, pl.DataFrame]
         values: Optional[dict[str, tuple]] = None,
         border: bool = False,
         show_all: bool = False,
@@ -158,7 +158,7 @@ class HierarchicalSelectionWidget(VBox):
             Map of column headers to column buttons.
         hierarchy : CohortHierarchy
             Hierarchical structure (e.g. column order).
-        combinations : pd.DataFrame
+        combinations : Union[pd.DataFrame, pl.DataFrame]
             DataFrame of valid value combinations across the hierarchy.
         values : Optional[dict[str,tuple]], optional
            Values that should be pre-selected, by default None.
@@ -250,11 +250,33 @@ class HierarchicalSelectionWidget(VBox):
             if parent_lvl not in combo_df.columns or child_lvl not in combo_df.columns:
                 continue
 
-            if parent_values:
-                filtered = combo_df[combo_df[parent_lvl].isin(parent_values)][child_lvl].dropna().unique()
+            # Handle both pandas and Polars DataFrames
+            import polars as pl
+
+            if isinstance(combo_df, pl.DataFrame):
+                # Polars syntax
+                if parent_values:
+                    filtered = (
+                        combo_df.filter(pl.col(parent_lvl).is_in(parent_values))[child_lvl]
+                        .drop_nulls()
+                        .unique()
+                        .to_list()
+                    )
+                else:
+                    parent_options = self.widgets[parent_lvl].options
+                    filtered = (
+                        combo_df.filter(pl.col(parent_lvl).is_in(parent_options))[child_lvl]
+                        .drop_nulls()
+                        .unique()
+                        .to_list()
+                    )
             else:
-                parent_options = self.widgets[parent_lvl].options
-                filtered = combo_df[combo_df[parent_lvl].isin(parent_options)][child_lvl].dropna().unique()
+                # Pandas syntax (backward compatibility)
+                if parent_values:
+                    filtered = combo_df[combo_df[parent_lvl].isin(parent_values)][child_lvl].dropna().unique()
+                else:
+                    parent_options = self.widgets[parent_lvl].options
+                    filtered = combo_df[combo_df[parent_lvl].isin(parent_options)][child_lvl].dropna().unique()
 
             new_options = sorted(set(filtered))
 
@@ -399,7 +421,9 @@ class MultiSelectionListWidget(ValueWidget, VBox):
         border: bool = False,
         show_all: bool = False,
         hierarchies: Optional[list[CohortHierarchy]] = None,
-        hierarchy_combinations: Optional[dict[tuple[str], "pd.DataFrame"]] = None,
+        hierarchy_combinations: Optional[
+            dict[tuple[str], any]
+        ] = None,  # Dict values can be pd.DataFrame or pl.DataFrame
     ):
         """
         A table of buttons organized into columns by their keys. Collapsable to save space.
@@ -418,7 +442,7 @@ class MultiSelectionListWidget(ValueWidget, VBox):
             If True, show all optoins, else show only selected, by default False.
         hierarchies: Optional[list[CohortHierarchy]], optional
             List of cohort hierarchies to consider, by default None.
-        hierarchy_combinations: Optional[dict[tuple[str], pd.DataFrame]], optional
+        hierarchy_combinations: Optional[dict[tuple[str], Union[pd.DataFrame, pl.DataFrame]]], optional
             Mapping of each hierarchy to valid combinations of values across its levels, by default None.
         """
         super().__init__()

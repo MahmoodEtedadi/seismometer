@@ -357,7 +357,17 @@ class OrdinalCategoricalPlot:
         data = {"Feedback Metrics": [sg.metrics[metric].display_name for metric in self.metrics]}
 
         # Count occurrences of each unique value in each metric column
-        col_counts = {col: self.dataframe[col].value_counts() for col in self.metrics}
+        # Polars value_counts() returns a DataFrame, pandas returns a Series
+        import polars as pl
+
+        col_counts = {}
+        for col in self.metrics:
+            vc = self.dataframe[col].value_counts()
+            # Handle both Polars (DataFrame) and pandas (Series)
+            if isinstance(vc, pl.DataFrame):  # Polars DataFrame
+                col_counts[col] = dict(zip(vc[col].to_list(), vc["count"].to_list()))
+            else:  # pandas Series
+                col_counts[col] = vc.to_dict()
         missing = [
             value
             for value in self.values

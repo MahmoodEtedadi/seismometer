@@ -85,8 +85,8 @@ class TestReportFunctions:
         df_mock = Mock()
         neg_df = Mock()
         pos_df = Mock()
-        neg_df.empty = neg_empty
-        pos_df.empty = pos_empty
+        neg_df.height = 0 if neg_empty else 10
+        pos_df.height = 0 if pos_empty else 10
 
         filter_rule_mock = MagicMock()
         filter_rule_mock.filter.side_effect = [neg_df, pos_df]
@@ -139,7 +139,7 @@ class TestReportFunctions:
 
         def wrap_filter(mock_filter, is_empty):
             mock_df = Mock()
-            mock_df.empty = is_empty
+            mock_df.height = 0 if is_empty else 10
             mock_filter.filter.return_value = mock_df
             return mock_filter
 

@@ -1,12 +1,13 @@
-from typing import Optional
+from typing import Optional, Union
 
 import pandas as pd
+import polars as pl
 
 from .pandas_helpers import is_valid_event
 
 
 def create_metric_timeseries(
-    dataframe: pd.DataFrame,
+    dataframe: Union[pd.DataFrame, pl.DataFrame],
     reftime: str,
     event_col: str,
     entity_keys: list[str],
@@ -15,7 +16,7 @@ def create_metric_timeseries(
     time_bounds: Optional[tuple] = None,
     boolean_event: bool = False,
     censor_threshold: int = 10,
-) -> pd.DataFrame:
+) -> Union[pd.DataFrame, pl.DataFrame]:
     """
     Summarize a dataframe into a frame for plotting a timeseries.
 
@@ -28,7 +29,7 @@ def create_metric_timeseries(
 
     Parameters
     ----------
-    dataframe : pd.DataFrame
+    dataframe : Union[pd.DataFrame, pl.DataFrame]
         The input data.
     reftime : str
         The column name of the reference time.
@@ -50,57 +51,89 @@ def create_metric_timeseries(
 
     Returns
     -------
-    pd.DataFrame
-        The filtered and summarized data.
+    Union[pd.DataFrame, pl.DataFrame]
+        The filtered and summarized data (same type as input).
     """
-    reduced = _limit_data(dataframe, event_col, reftime, boolean_event=boolean_event, time_bounds=time_bounds)
+    # Detect DataFrame type
+    is_polars = isinstance(dataframe, pl.DataFrame)
 
-    line_data = _orient_frequency_per_entity(reduced, entity_keys, reftime)
+    # Convert to Polars if needed for processing
+    if not is_polars:
+        df_polars = pl.from_pandas(dataframe)
+    else:
+        df_polars = dataframe
 
-    return _censor_small_groups(
+    reduced = _limit_data_polars(df_polars, event_col, reftime, boolean_event=boolean_event, time_bounds=time_bounds)
+
+    line_data = _orient_frequency_per_entity_polars(reduced, entity_keys, reftime)
+
+    result = _censor_small_groups_polars(
         line_data, event_col, group_columns=[reftime, cohort_col], censor_threshold=censor_threshold
     )
 
+    # Convert back to pandas if input was pandas
+    if not is_polars:
+        # Sort to ensure consistent ordering (pandas and polars may have different default orders)
+        result_sorted = result.sort([cohort_col, event_col])
+        return result_sorted.to_pandas().reset_index(drop=True)
+    return result
 
-def _orient_frequency_per_entity(dataframe: pd.DataFrame, entity_keys: list[str], reftime: str) -> pd.DataFrame:
+
+def _orient_frequency_per_entity_polars(dataframe: pl.DataFrame, entity_keys: list[str], reftime: str) -> pl.DataFrame:
     """Reduces and aligns the data to the earliest instance of a given week."""
-    line_data = dataframe[~dataframe[entity_keys].duplicated()].copy()
-    # Note: W-SUN specifies the LAST day of the week
-    line_data[reftime] = line_data[reftime].dt.to_period("W-SUN").dt.start_time
-    return line_data.reset_index(drop=True)
+    # Get unique rows based on entity_keys
+    line_data = dataframe.unique(subset=entity_keys, keep="first")
+
+    # Truncate datetime to week
+    # In Polars, truncate to week starts on Monday, but we'll use it as is for consistency
+    line_data = line_data.with_columns(pl.col(reftime).dt.truncate("1w").alias(reftime))
+
+    return line_data
 
 
-def _limit_data(
-    dataframe: pd.DataFrame,
+def _limit_data_polars(
+    dataframe: pl.DataFrame,
     event_col: str,
     reftime: str,
     boolean_event: bool = False,
     time_bounds: Optional[tuple] = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """Reduces the data to only include valid data points."""
-    include = dataframe[reftime].notna()
+    include = pl.col(reftime).is_not_null()
 
     if boolean_event:
         include = include & (is_valid_event(dataframe, event_col, reftime))
-    reduced = dataframe[include]
+
+    reduced = dataframe.filter(include)
 
     if time_bounds is None:
         return reduced
 
-    return reduced[
-        (reduced[reftime] >= pd.to_datetime(time_bounds[0])) & (reduced[reftime] <= pd.to_datetime(time_bounds[1]))
-    ]
+    # Convert time bounds to datetime if they're strings
+    min_time = pl.lit(time_bounds[0]).cast(pl.Datetime)
+    max_time = pl.lit(time_bounds[1]).cast(pl.Datetime)
+
+    return reduced.filter((pl.col(reftime) >= min_time) & (pl.col(reftime) <= max_time))
 
 
-def _censor_small_groups(
-    dataframe: pd.DataFrame, event_col: str, group_columns: list[str], censor_threshold: int
-) -> pd.DataFrame:
+def _censor_small_groups_polars(
+    dataframe: pl.DataFrame, event_col: str, group_columns: list[str], censor_threshold: int
+) -> pl.DataFrame:
     """Reduces the data to only the data where each group has sufficient size per timestamp."""
-    counts = dataframe.groupby(group_columns, observed=True).count()
-    msk_min = counts[event_col] <= censor_threshold
-    invmask = counts[msk_min].reset_index()[group_columns]
-    invmask["DROPPING"] = 1
+    # Count occurrences in each group
+    counts = dataframe.group_by(group_columns).agg(pl.col(event_col).count().alias("count"))
 
-    return_data = dataframe.merge(invmask, on=group_columns, how="outer")
-    return_data = return_data.loc[return_data["DROPPING"] != 1]
-    return return_data[group_columns + [event_col]]
+    # Find groups with counts <= threshold
+    small_groups = counts.filter(pl.col("count") <= censor_threshold).select(group_columns)
+
+    # Mark small groups for dropping
+    small_groups = small_groups.with_columns(pl.lit(1).alias("DROPPING"))
+
+    # Left join to mark rows from small groups
+    return_data = dataframe.join(small_groups, on=group_columns, how="left")
+
+    # Filter out rows from small groups (where DROPPING == 1)
+    return_data = return_data.filter(pl.col("DROPPING").is_null())
+
+    # Return only the relevant columns
+    return return_data.select(group_columns + [event_col])

@@ -1,6 +1,7 @@
 from unittest.mock import Mock, patch
 
 import pandas as pd
+import polars as pl
 import pytest
 from conftest import res  # noqa: F401
 
@@ -58,8 +59,11 @@ class Test_Summaries:
         fake_seismo.output = "Score"
         fake_seismo.target = "Target"
         fake_seismo.event_aggregation_method = lambda x: "max"
-        actual = undertest.default_cohort_summaries(prediction_data, "Has_ECG", [1, 2, 3, 4, 5], "ID")
-        pd.testing.assert_frame_equal(actual, expected_default_summary, check_names=False)
+        # Convert pandas to polars for the function call
+        actual = undertest.default_cohort_summaries(pl.from_pandas(prediction_data), "Has_ECG", [1, 2, 3, 4, 5], "ID")
+        # Convert result back to pandas for comparison, set attribute column as index
+        actual_pd = actual.to_pandas().set_index("Has_ECG")
+        pd.testing.assert_frame_equal(actual_pd, expected_default_summary, check_names=False)
 
     @patch.object(seismogram, "Seismogram", return_value=Mock())
     def test_score_target_summaries(
@@ -71,8 +75,26 @@ class Test_Summaries:
         fake_seismo.event_aggregation_method = lambda x: "max"
         groupby_groups = ["Has_ECG", expected_score_target_summary_cuts]
         grab_groups = ["Has_ECG", "Score"]
+        # Convert pandas to polars for the function call
+        result = undertest.score_target_cohort_summaries(
+            pl.from_pandas(prediction_data), groupby_groups, grab_groups, "ID"
+        )
+        # Convert result to pandas and set index to match expected format
+        result_pd = result.to_pandas()
+        # Convert Score column from string to Interval objects to match expected format
+        result_pd["Score"] = (
+            result_pd["Score"]
+            .str.strip("()[]")
+            .str.split(",", expand=True)
+            .astype(float)
+            .apply(lambda x: pd.Interval(x[0], x[1]), axis=1)
+            .astype(pd.CategoricalDtype([pd.Interval(0, 0.5), pd.Interval(0.5, 1)], ordered=True))
+        )
+        result_pd["Predictions"] = result_pd["Predictions"].astype("int64")
+        result_pd["Entities"] = result_pd["Entities"].astype("Int64")
+        result_pd = result_pd.set_index(["Has_ECG", "Score"]).sort_index()
         pd.testing.assert_frame_equal(
-            undertest.score_target_cohort_summaries(prediction_data, groupby_groups, grab_groups, "ID"),
+            result_pd,
             expected_score_target_summary,
         )
 
@@ -107,9 +129,11 @@ class Test_Summaries:
         # Calculate score target cohort summary using score_target_cohort_summaries
         groupby_groups = ["Has_ECG", "Target_Value", expected_score_target_summary_cuts]
         grab_groups = ["Has_ECG", "Score", "Target_Value"]
-        entities_summary = undertest.score_target_cohort_summaries(prediction_data, groupby_groups, grab_groups, "ID")[
-            "Entities"
-        ]
+        # Convert pandas to polars for the function call
+        result = undertest.score_target_cohort_summaries(
+            pl.from_pandas(prediction_data), groupby_groups, grab_groups, "ID"
+        )
+        entities_summary = result.to_pandas()["Entities"]
 
         # Ensuring they produce the same number of entities for each score-target-cohort group
         assert entities_event_score.tolist() == entities_summary.tolist()

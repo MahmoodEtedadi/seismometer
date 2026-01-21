@@ -41,6 +41,14 @@ def compare_series(
     show_legend : bool, optional
         A flag when set will show the legend on the plot, by default True.
     """
+    import polars as pl
+
+    # Convert Polars to pandas if needed (seaborn works with both but pandas operations below require it)
+    if isinstance(plotdata, pl.DataFrame):
+        plotdata = plotdata.to_pandas()
+    if counts is not None and isinstance(counts, pl.DataFrame):
+        counts = counts.to_pandas()
+
     n_vert = 1 if counts is None else 2
     fig, axes = plt.subplots(n_vert, 1, figsize=(9, 2 * n_vert))
 

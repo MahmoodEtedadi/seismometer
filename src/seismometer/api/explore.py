@@ -247,32 +247,67 @@ def cohort_list_details(cohort_dict: dict[str, tuple[Any]]) -> HTML:
     outcome_cols = [pdh.event_value(x) for x in cfg.outcomes]
 
     rule = filter_rule_from_cohort_dictionary(cohort_dict)
-    data = rule.filter(sg.dataframe)[
+    import polars as pl
+
+    data = rule.filter(sg.dataframe).select(
         cfg.entity_keys + cfg.output_list + intervention_cols + outcome_cols + target_cols
-    ]
-    cohort_count = data[sg.entity_keys[0]].nunique()
+    )
+    cohort_count = data[sg.entity_keys[0]].n_unique()
     if cohort_count < sg.censor_threshold:
         return template.render_censored_plot_message(sg.censor_threshold)
 
-    groups = data.groupby(target_cols)
-    float_cols = list(data[intervention_cols + outcome_cols].select_dtypes(include=float))
+    # Identify float columns
+    float_cols = [col for col in intervention_cols + outcome_cols if data.schema[col] in [pl.Float32, pl.Float64]]
 
-    stat_dict = {k: ["mean"] for k in float_cols}
-    stat_dict[cfg.entity_id] = ["nunique", "count"]
+    # Build aggregation expressions
+    agg_exprs = []
+    agg_col_names = []
+
+    # Mean for float columns
+    for col in float_cols:
+        agg_exprs.append(pl.col(col).mean().alias(pdh.event_name(col)))
+        agg_col_names.append(pdh.event_name(col))
+
+    # Entity stats
+    agg_exprs.append(pl.col(cfg.entity_id).n_unique().alias(f"Unique {cfg.entity_id}"))
+    agg_col_names.append(f"Unique {cfg.entity_id}")
+    agg_exprs.append(pl.col(cfg.entity_id).len().alias(f"{cfg.entity_id} Count"))
+    agg_col_names.append(f"{cfg.entity_id} Count")
+
+    # Context stats if available
     if cfg.context_id is not None:
-        stat_dict[cfg.context_id] = ["nunique"]
+        agg_exprs.append(pl.col(cfg.context_id).n_unique().alias(f"Unique {cfg.context_id}"))
+        agg_col_names.append(f"Unique {cfg.context_id}")
 
-    groupstats = groups.agg(stat_dict)
-    groupstats.columns = (
-        [pdh.event_name(x) for x in float_cols]
-        + [f"Unique {cfg.entity_id}", f"{cfg.entity_id} Count"]
-        + ([f"Unique {cfg.context_id}"] if cfg.context_id is not None else [])
-    )
-    new_names = [pdh.event_name(x) for x in target_cols]
-    if len(new_names) == 1:
-        new_names = new_names[0]  # because pandas Index only accepts a string for rename.
-    groupstats.index.rename(new_names, inplace=True)
-    html_table = groupstats.to_html()
+    groupstats = data.group_by(target_cols, maintain_order=True).agg(agg_exprs)
+
+    # Build HTML table directly from Polars DataFrame
+    html_parts = ['<table border="1" class="dataframe">']
+
+    # Header row
+    html_parts.append('<thead><tr style="text-align: right;">')
+    for col in target_cols:
+        html_parts.append(f"<th>{col}</th>")
+    for col in agg_col_names:
+        html_parts.append(f"<th>{col}</th>")
+    html_parts.append("</tr></thead>")
+
+    # Data rows
+    html_parts.append("<tbody>")
+    for row in groupstats.iter_rows(named=True):
+        html_parts.append("<tr>")
+        for col in target_cols:
+            html_parts.append(f"<td>{row[col]}</td>")
+        for col in agg_col_names:
+            val = row[col]
+            if isinstance(val, float):
+                html_parts.append(f"<td>{val:.4f}</td>")
+            else:
+                html_parts.append(f"<td>{val}</td>")
+        html_parts.append("</tr>")
+    html_parts.append("</tbody></table>")
+
+    html_table = "".join(html_parts)
     title = "Summary"
     return template.render_title_message(title, html_table)
 

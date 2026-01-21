@@ -65,7 +65,13 @@ def can_draw_empty_perf(plot_fn: Callable) -> Any:
         ax = kwargs.get("axis", None)
         if ax is not None:
             data = args[0]
-            if data is None or data.empty:
+            # Check for empty DataFrame - works for both pandas and Polars
+            is_empty = (
+                data is None
+                or (hasattr(data, "height") and data.height == 0)
+                or (hasattr(data, "empty") and data.empty)
+            )
+            if is_empty:
                 ax.plot([], [])
                 return None
         return plot_fn(*args, **kwargs)

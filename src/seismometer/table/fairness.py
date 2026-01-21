@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 import numpy as np
-import pandas as pd
+import polars as pl
 import traitlets
 from great_tables import GT, html, loc, style
 from ipywidgets import HTML, Box, FloatSlider, Layout, ValueWidget, VBox
@@ -112,32 +112,44 @@ class FairnessIcons(Enum):
 # region Fairness Table
 
 
-def sort_fairness_table(dataframe: pd.DataFrame, cohort_groups: tuple[str]):
+def sort_fairness_table(dataframe: pl.DataFrame, cohort_groups: tuple[str]):
     """
     Generates a sort key for the fairness table based on Cohort group name and Count
 
     Parameters
     ----------
-    dataframe : pd.DataFrame
+    dataframe : pl.DataFrame
         DataFrame to sort
     cohort_groups : tuple[str]
         Cohort group names for sorting.
     """
+    # Create sort keys for cohort and count
+    cohort_order_map = {cohort: idx for idx, cohort in enumerate(cohort_groups)}
 
-    def fairness_sort_key(key: pd.Series) -> pd.Series:
-        match key.name:
-            case "Count":
-                return key.apply(lambda x: -x if x not in [FairnessIcons.UNKNOWN.value, "--"] else 0)
-            case "Cohort":
-                return key.apply(lambda x: cohort_groups.index(x))
-            case _:
-                return key
+    # Use map_elements to handle mixed types in Count column
+    def count_sort_key(val):
+        if val in [FairnessIcons.UNKNOWN.value, "--", None]:
+            return 0
+        try:
+            return -int(val)
+        except (ValueError, TypeError):
+            return 0
 
-    return dataframe.sort_values(by=[COHORT, COUNT], key=fairness_sort_key)
+    dataframe = dataframe.with_columns(
+        [
+            pl.col(COHORT)
+            .map_elements(lambda x: cohort_order_map.get(x, 999), return_dtype=pl.Int32)
+            .alias("_cohort_order"),
+            pl.col(COUNT).map_elements(count_sort_key, return_dtype=pl.Int64).alias("_count_order"),
+        ]
+    )
+
+    result = dataframe.sort(["_cohort_order", "_count_order"]).drop(["_cohort_order", "_count_order"])
+    return result
 
 
 def fairness_table(
-    dataframe: pd.DataFrame,
+    dataframe: pl.DataFrame,
     metric_fn: Callable[..., dict[str, float]],
     metric_list: list[str] = None,
     fairness_ratio: float = 0.25,
@@ -163,7 +175,7 @@ def fairness_table(
 
     Parameters
     ----------
-    dataframe : pd.DataFrame
+    dataframe : pl.DataFrame
         Source data to generate a fairness table for
     metric_fn : Callable[..., dict[str, float]]
         Metric function to generate raw metrics, which MUST be positive values.
@@ -197,15 +209,13 @@ def fairness_table(
     recorder = metric_apis.OpenTelemetryRecorder(metric_names=metric_list, name="Fairness Table Metric Generator")
 
     for cohort_column in cohort_dict:
-        cohort_indices = []
-        cohort_values = []
+        cohort_rows = []
         for cohort_class in cohort_dict[cohort_column]:
-            cohort_indices.append((cohort_column, cohort_class))
-
             cohort_filter = FilterRule.eq(cohort_column, cohort_class)
             cohort_dataframe = cohort_filter.filter(dataframe)
 
-            index_value = {COUNT: len(cohort_dataframe)}
+            row_data = {COHORT: cohort_column, CLASS: cohort_class, COUNT: len(cohort_dataframe)}
+
             # Add all of the information we can reasonably find.
             attribute_info = {"fairness_ratio": fairness_ratio}
             for attr in "score_threshold", "target_col", "score_col":
@@ -214,47 +224,129 @@ def fairness_table(
             rho_info = {"rho": rho}
             metrics = metric_fn(cohort_dataframe, metric_list, **kwargs)
             recorder.populate_metrics({cohort_column: cohort_class} | attribute_info | rho_info, metrics)
-            index_value.update(metrics)
+            row_data.update(metrics)
 
-            cohort_values.append(index_value)
-        cohort_data = pd.DataFrame.from_records(
-            cohort_values, index=pd.MultiIndex.from_tuples(cohort_indices, names=[COHORT, CLASS])
-        )
-        cohort_ratios = cohort_data.div(cohort_data.loc[cohort_data[COUNT].idxmax()], axis=1)
+            cohort_rows.append(row_data)
 
-        cohort_icons = cohort_ratios.drop(COUNT, axis=1).map(
-            lambda ratio: FairnessIcons.get_fairness_icon(ratio, fairness_ratio)
-        )
-        cohort_icons[COUNT] = cohort_data[COUNT]
+        # Create Polars DataFrame
+        cohort_data = pl.DataFrame(cohort_rows)
+
+        # Find the row with maximum count
+        max_count_row = cohort_data.filter(pl.col(COUNT) == pl.col(COUNT).max()).row(0, named=True)
+
+        # Calculate ratios by dividing each metric by the max count row's metric
+        ratio_exprs = [pl.col(COUNT).alias(COUNT)]
+        for metric in metric_list:
+            max_val = max_count_row[metric]
+            ratio_exprs.append((pl.col(metric) / max_val).alias(metric))
+        cohort_ratios = cohort_data.select([COHORT, CLASS] + ratio_exprs)
+
+        # Generate fairness icons - store as strings directly
+        icon_data = cohort_ratios.clone()
+        for metric in metric_list:
+            icon_data = icon_data.with_columns(
+                pl.col(metric)
+                .map_elements(
+                    lambda x: FairnessIcons.get_fairness_icon(x, fairness_ratio).value, return_dtype=pl.String
+                )
+                .alias(metric)
+            )
 
         fairness_groups.append(cohort_ratios)
-        icon_groups.append(cohort_icons)
+        icon_groups.append(icon_data)
         metric_groups.append(cohort_data)
 
-    fairness_data = pd.concat(fairness_groups)
-    metric_data = pd.concat(metric_groups)
-    fairness_icons = pd.concat(icon_groups).astype(object)
+    # Concatenate all cohort groups
+    fairness_data = pl.concat(fairness_groups)
+    metric_data = pl.concat(metric_groups)
+    fairness_icons = pl.concat(icon_groups)
 
-    for cohort_column, cohort_class in metric_data.index:
-        if metric_data.loc[(cohort_column, cohort_class), COUNT] < censor_threshold:
-            fairness_icons.loc[(cohort_column, cohort_class), COUNT] = FairnessIcons.UNKNOWN.value
-            for metric in metric_list:
-                fairness_icons.loc[(cohort_column, cohort_class), metric] = FairnessIcons.UNKNOWN
-                metric_data.loc[(cohort_column, cohort_class), metric] = np.nan
-                fairness_data.loc[(cohort_column, cohort_class), metric] = np.nan
+    # Apply censoring for small cohorts
+    # Create a boolean column to mark censored rows (must do this while COUNT is still numeric)
+    metric_data = metric_data.with_columns((pl.col(COUNT) < censor_threshold).alias("_censored"))
+    fairness_data = fairness_data.with_columns((pl.col(COUNT) < censor_threshold).alias("_censored"))
+    fairness_icons = fairness_icons.with_columns((pl.col(COUNT) < censor_threshold).alias("_censored"))
 
-    fairness_icons[metric_list] = fairness_icons[metric_list].map(
-        lambda x: x.value if x != FairnessIcons.UNKNOWN else "--"
+    # Update metric_data: set metrics to null when censored
+    for metric in metric_list:
+        metric_data = metric_data.with_columns(
+            pl.when(pl.col("_censored")).then(None).otherwise(pl.col(metric)).alias(metric)
+        )
+
+    # Update fairness_data: set metrics to null when censored
+    for metric in metric_list:
+        fairness_data = fairness_data.with_columns(
+            pl.when(pl.col("_censored")).then(None).otherwise(pl.col(metric)).alias(metric)
+        )
+
+    # Update fairness_icons: set COUNT and metrics to UNKNOWN when censored
+    fairness_icons = fairness_icons.with_columns(
+        pl.when(pl.col("_censored"))
+        .then(pl.lit(FairnessIcons.UNKNOWN.value))
+        .otherwise(pl.col(COUNT).cast(pl.String))
+        .alias(COUNT)
     )
-    fairness_icons[metric_list] = (
-        fairness_icons[metric_list]
-        + metric_data[metric_list].map(lambda x: f"  {x:.2f}  " if not np.isnan(x) else "")
-        + fairness_data[metric_list].map(lambda x: f"  ({x-1:.2%})  " if (np.isfinite(x) and x != 1.0) else "")
+    for metric in metric_list:
+        fairness_icons = fairness_icons.with_columns(
+            pl.when(pl.col("_censored"))
+            .then(pl.lit(FairnessIcons.UNKNOWN.value))
+            .otherwise(pl.col(metric))
+            .alias(metric)
+        )
+
+    # Drop the temporary censored column
+    metric_data = metric_data.drop("_censored")
+    fairness_data = fairness_data.drop("_censored")
+    fairness_icons = fairness_icons.drop("_censored")
+
+    # Format metric values as strings
+    metric_data_formatted = metric_data.select(
+        [COHORT, CLASS]
+        + [
+            pl.when(pl.col(metric).is_null())
+            .then(pl.lit(""))
+            .otherwise(pl.col(metric).map_elements(lambda x: f"  {x:.2f}  ", return_dtype=pl.String))
+            .alias(f"{metric}_metric")
+            for metric in metric_list
+        ]
     )
+
+    # Format fairness ratios as strings
+    fairness_data_formatted = fairness_data.select(
+        [COHORT, CLASS]
+        + [
+            pl.when(pl.col(metric).is_null() | (pl.col(metric) == 1.0))
+            .then(pl.lit(""))
+            .otherwise((pl.col(metric) - 1).map_elements(lambda x: f"  ({x:.2%})  ", return_dtype=pl.String))
+            .alias(f"{metric}_fairness")
+            for metric in metric_list
+        ]
+    )
+
+    # Convert icon strings: replace UNKNOWN emoji with "--" for display
+    for metric in metric_list:
+        fairness_icons = fairness_icons.with_columns(
+            pl.when(pl.col(metric) == FairnessIcons.UNKNOWN.value)
+            .then(pl.lit("--"))
+            .otherwise(pl.col(metric))
+            .alias(metric)
+        )
+
+    # Join the formatted metric and fairness data
+    fairness_icons = fairness_icons.join(metric_data_formatted, on=[COHORT, CLASS], how="left")
+    fairness_icons = fairness_icons.join(fairness_data_formatted, on=[COHORT, CLASS], how="left")
+
+    # Concatenate strings for each metric
+    for metric in metric_list:
+        fairness_icons = fairness_icons.with_columns(
+            (
+                pl.col(metric) + pl.col(f"{metric}_metric").fill_null("") + pl.col(f"{metric}_fairness").fill_null("")
+            ).alias(metric)
+        ).drop([f"{metric}_metric", f"{metric}_fairness"])
 
     legend = FairnessIcons.get_fairness_legend(fairness_ratio, censor_threshold=censor_threshold)
 
-    table_data = fairness_icons.reset_index()[[COHORT, CLASS, COUNT] + metric_list]
+    table_data = fairness_icons.select([COHORT, CLASS, COUNT] + metric_list)
     table_data = sort_fairness_table(table_data, list(cohort_dict.keys()))
 
     table_html = (

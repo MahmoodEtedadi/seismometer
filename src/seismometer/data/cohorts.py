@@ -1,25 +1,25 @@
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from .decorators import export
 from .performance import calculate_bin_stats
 
-SeriesOrArray = Union[pd.Series, np.ndarray]
+SeriesOrArray = Union[pl.Series, np.ndarray]
 
 # region Stats
 
 
 @export
 def get_cohort_data(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     cohort_feature: str,
     *,
     proba: Union[str, SeriesOrArray],
     true: Union[str, SeriesOrArray] = "TARGET",
     splits: Optional[List] = None,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Convenience function to create and format data for use in the cohort plots.
     Takes in information about the class, predictions, and true labels to output a dataset and corresponding labels.
@@ -32,7 +32,7 @@ def get_cohort_data(
 
     Parameters
     ----------
-    df : pd.DataFrame
+    df : pl.DataFrame
         Dataframe of observations to use for plotting, must contain the column specified in cohort_feature.
         Additionally, must contain columns specified by proba and true if using strings and not arrays.
     cohort_feature : str
@@ -57,32 +57,38 @@ def get_cohort_data(
 
     Returns
     -------
-    pd.DataFrame
+    pl.DataFrame
         Data - ingestible by plot_cohort_* functions.
     """
+    # Auto-convert pandas DataFrame to Polars for backward compatibility
+    if not isinstance(df, pl.DataFrame):
+        import pandas as pd
+
+        if isinstance(df, pd.DataFrame):
+            df = pl.from_pandas(df)
+
     # Find data
-    proba_series = resolve_col_data(df, proba).astype(float)
-    true_series = resolve_col_data(df, true).astype(float)  # handle nan but require numeric
+    proba_series = resolve_col_data(df, proba).cast(pl.Float64)
+    true_series = resolve_col_data(df, true).cast(pl.Float64)  # handle nan but require numeric
 
     cohort_series = resolve_cohorts(df[cohort_feature], splits)
 
     # Create standard DataFrame
-    rv = pd.concat([true_series, proba_series, cohort_series], axis="columns")
-    rv.columns = ["true", "pred", "cohort"]  # Force column names to be consistent
+    rv = pl.DataFrame({"true": true_series, "pred": proba_series, "cohort": cohort_series})
 
-    return rv.dropna(axis="index", how="any")
+    return rv.drop_nulls()
 
 
 @export
 def get_cohort_performance_data(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     cohort_feature: str,
     *,
     proba: Union[str, SeriesOrArray],
     true: Union[str, SeriesOrArray] = "TARGET",
     splits: Optional[List] = None,
     censor_threshold: int = 10,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
     Generates a dataframe with particular performance metrics (accuracy, sensitivity,
     specificity, ppv, npv, and flag rate (predicted positive condition rate)) for
@@ -90,7 +96,7 @@ def get_cohort_performance_data(
 
     Parameters
     ----------
-    df : pd.DataFrame
+    df : pl.DataFrame
         Dataframe of observations to use, must contain the column specified in cohort_feature.
         Additionally, must contain columns specified by proba and true if using strings and not arrays.
     cohort_feature : str
@@ -117,68 +123,87 @@ def get_cohort_performance_data(
 
     Returns
     -------
-    pd.DataFrame
+    pl.DataFrame
         Performance statistics for particular threshold values by cohort.
     """
+    import pandas as pd
+
     data = get_cohort_data(df, cohort_feature, proba=proba, true=true, splits=splits)
 
     cohort_perf_stats = []
     observed = set()
-    data["true"] = data["true"].astype(int)
-    for label, group_data in data.groupby("cohort", observed=True):
-        if (group_data.true.sum() == 0) or (group_data.true.count() < censor_threshold):
+    data = data.with_columns(pl.col("true").cast(pl.Int64))
+
+    # Get all unique cohort labels
+    all_cohorts = data["cohort"].unique().drop_nulls().to_list()
+
+    for cohort_df in data.partition_by("cohort", as_dict=False):
+        if cohort_df.height == 0:
             continue
-        ind_perf_stats = calculate_bin_stats(group_data.true, group_data.pred)
+
+        label = cohort_df["cohort"][0]
+        true_sum = cohort_df["true"].sum()
+        true_count = cohort_df.height
+
+        if true_sum == 0 or true_count < censor_threshold:
+            continue
+
+        # calculate_bin_stats expects pandas Series - convert only the needed data
+        true_series = pd.Series(cohort_df["true"].to_numpy())
+        pred_series = pd.Series(cohort_df["pred"].to_numpy())
+
+        ind_perf_stats = calculate_bin_stats(true_series, pred_series)
         ind_perf_stats["cohort"] = label
-        ind_perf_stats["cohort-count"] = len(group_data)
-        ind_perf_stats["cohort-targetcount"] = group_data.true.sum()
+        ind_perf_stats["cohort-count"] = true_count
+        ind_perf_stats["cohort-targetcount"] = true_sum
 
         cohort_perf_stats.append(ind_perf_stats)
         observed.add(label)
 
     # Add empty cohorts
-    for label in set(data["cohort"].cat.categories) - observed:
+    for label in set(all_cohorts) - observed:
         cohort_perf_stats.append(
             pd.DataFrame({"cohort": label, "cohort-count": 0, "cohort-targetcount": 0}, index=[0])
         )
 
     if not cohort_perf_stats:
-        return pd.DataFrame()
+        return pl.DataFrame()
 
     frame = pd.concat(cohort_perf_stats, ignore_index=True)
-    frame["cohort"] = frame["cohort"].astype(pd.CategoricalDtype(data["cohort"].cat.categories))
+    # Convert back to Polars
+    return pl.from_pandas(frame)
 
-    return frame
 
-
-def resolve_col_data(df: pd.DataFrame, feature: Union[str, pd.Series]) -> pd.Series:
+def resolve_col_data(df: pl.DataFrame, feature: Union[str, pl.Series]) -> pl.Series:
     """
     Handles resolving feature from either being a series or specifying a series in the dataframe.
 
     Parameters
     ----------
-    df : pd.DataFrame
+    df : pl.DataFrame
         Containing a column of name feature if feature is passed in as a string.
-    feature : Union[str, pd.Series]
-        Either a pandas.Series or a column name in the dataframe.
+    feature : Union[str, pl.Series]
+        Either a polars.Series or a column name in the dataframe.
 
     Returns
     -------
-    pd.Series.
+    pl.Series.
     """
 
     if isinstance(feature, str):
         if feature in df.columns:
-            return df[feature].copy()
+            col = df[feature]
+            # Polars uses .clone(), pandas uses .copy()
+            return col.clone() if hasattr(col, "clone") else col.copy()
         else:
             raise KeyError(f"Feature {feature} was not found in dataframe")
     elif hasattr(feature, "ndim"):
         if feature.ndim > 1:  # probas from sklearn is nx2 with second column being the positive predictions
-            return feature[:, 1]
+            return pl.Series(feature[:, 1])
         else:
-            return feature
+            return pl.Series(feature) if not isinstance(feature, pl.Series) else feature
     else:
-        raise TypeError("Feature must be a string or pandas.Series, was given a ", type(feature))
+        raise TypeError("Feature must be a string or polars.Series, was given a ", type(feature))
 
 
 # endregion
@@ -186,7 +211,7 @@ def resolve_col_data(df: pd.DataFrame, feature: Union[str, pd.Series]) -> pd.Ser
 
 
 @export
-def resolve_cohorts(series: SeriesOrArray, splits: Optional[List] = None) -> pd.Series:
+def resolve_cohorts(series: SeriesOrArray, splits: Optional[List] = None) -> pl.Series:
     """
     Bin a series of data based on the defined splits if defined.
     Only handles numeric and categorical data.
@@ -194,45 +219,50 @@ def resolve_cohorts(series: SeriesOrArray, splits: Optional[List] = None) -> pd.
     Parameters
     ----------
     series : SeriesOrArray
-        pandas series of data to bin.
+        polars series of data to bin.
     splits : Optional[List], optional
         List of splits to define inner bins (default: None).
 
     Returns
     -------
-    pd.Series
+    pl.Series
         Categorical series with labels.
     """
-    if hasattr(series, "cat"):  # is categorical series
+    # Check if series is categorical (Polars Categorical dtype)
+    if isinstance(series.dtype, pl.Categorical) or series.dtype == pl.Categorical:
         return label_cohorts_categorical(series, splits)
     # Treat everything else like continuous - can raise errors with unexpected data types
     return label_cohorts_numeric(series, splits)
 
 
-def label_cohorts_numeric(series: SeriesOrArray, splits: Optional[List] = None) -> pd.Series:
+def label_cohorts_numeric(series: SeriesOrArray, splits: Optional[List] = None) -> pl.Series:
     """
     Bin a continuous numeric series of data, based on thresholds of inner bin edges.
 
     Parameters
     ----------
     series : SeriesOrArray
-        pandas series of data to bin.
+        polars series of data to bin.
     splits : Optional[List], optional
         List of splits to define inner bins (default: None-> series.mean()).
 
     Returns:
     --------
-    pd.Series
+    pl.Series
         Categorical series with labels.
     """
-    bins = find_bin_edges(series, splits)
-    bin_ixs = np.digitize(series, bins, right=False)
+    # Convert to numpy for binning
+    series_np = series.to_numpy()
+    bins = find_bin_edges(series_np, splits)
+    bin_ixs = np.digitize(series_np, bins, right=False)
     has_good_binning(bin_ixs, bins)
 
     labels = [f"{bins[i]}-{bins[i+1]}" for i in range(len(bins) - 1)] + [f">={bins[-1]}"]
     labels[0] = f"<{bins[1]}"
-    cat = pd.Categorical.from_codes(bin_ixs - 1, labels)
-    return pd.Series(cat)
+
+    # Map bin indices to labels
+    label_values = [labels[ix - 1] for ix in bin_ixs]
+    return pl.Series(label_values, dtype=pl.Categorical)
 
 
 def has_good_binning(bin_ixs: List, bin_edges: List) -> None:
@@ -258,35 +288,44 @@ def has_good_binning(bin_ixs: List, bin_edges: List) -> None:
         raise IndexError("Splits provided contain some empty bins.")
 
 
-def label_cohorts_categorical(series: SeriesOrArray, cat_values: Optional[list] = None) -> Tuple[pd.Series, list[str]]:
+def label_cohorts_categorical(series: SeriesOrArray, cat_values: Optional[list] = None) -> pl.Series:
     """
     Bin a categorical series of data, reduced to a set of category values.
 
     Parameters
     ----------
     series : SeriesOrArray
-        pandas series of data to bin.
+        polars series of data to bin.
     cat_values : Optional[list], optional
         List of categories to reduce to (default: None-> all observed categories).
 
     Returns
     -------
-        np.array of ints indicating the bin index for each value in the input series.
-        List of string labels for each bin; which is the list of categories.
+    pl.Series
+        Categorical series with filtered categories.
     """
-    series.name = "cohort"
-    series.cat._name = "cohort"  # CategoricalAccessors have a different name..
+    # Ensure we have a Series, not an Expr
+    if isinstance(series, pl.Expr):
+        # If it's an Expr, we need to evaluate it first - this shouldn't happen in normal usage
+        raise TypeError(f"Expected pl.Series, got {type(series)}")
 
-    # If no splits specified, restrict to observed values
+    # If no splits specified, return all observed values as categorical
     if cat_values is None:
-        return series.cat.remove_unused_categories()
+        return series.cast(pl.Categorical)
 
-    # If the series has exactly the request categories, return it
-    if set(cat_values) == set(series.cat.categories):
-        return series
+    # Get unique categories in the series
+    unique_cats = series.unique().drop_nulls().to_list()
 
+    # If the series has exactly the requested categories, return it
+    if set(cat_values) == set(unique_cats):
+        return series.cast(pl.Categorical)
+
+    # Filter to only the requested categories
     if cat_values is not None:
-        return series.where(series.isin(cat_values), np.nan)
+        # Create new series with values not in cat_values set to None
+        df_temp = pl.DataFrame({"col": series})
+        filtered = df_temp.select(pl.when(pl.col("col").is_in(cat_values)).then(pl.col("col")).otherwise(None))["col"]
+        return filtered.cast(pl.Categorical)
 
 
 def find_bin_edges(series: SeriesOrArray, thresholds: Optional[list] = None) -> list[float]:

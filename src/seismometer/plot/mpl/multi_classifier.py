@@ -48,10 +48,19 @@ def cohort_evaluation_vs_threshold(
     highlight : Optional[list[float]], optional
         An optional list of thresholds to highlight on the plots, by default None.
     """
+    import polars as pl
+
+    # Convert Polars to pandas if needed
+    if isinstance(stats, pl.DataFrame):
+        stats = stats.to_pandas()
+
     cohort_col = "cohort"
 
     # validate labels against cat values
     if labels is None:
+        # Ensure categorical type
+        if not pd.api.types.is_categorical_dtype(stats[cohort_col]):
+            stats[cohort_col] = stats[cohort_col].astype("category")
         labels = stats[cohort_col].cat.categories
 
     if splits is not None:  # Unneeded for categoricals
@@ -111,11 +120,23 @@ def leadtime_violin(
     figsize : tuple[int,int], optional
         Size of the figure, by defaults to 9x6.
     """
+    import polars as pl
+
+    # Convert Polars to pandas if needed
+    if isinstance(data, pl.DataFrame):
+        data = data.to_pandas()
+
+    # Ensure categorical and remove unused categories
+    if pd.api.types.is_categorical_dtype(data[y_col]):
+        y_data = data[y_col].cat.remove_unused_categories()
+    else:
+        data[y_col] = data[y_col].astype("category")
+        y_data = data[y_col].cat.remove_unused_categories()
 
     sns.violinplot(
         data=data,
         x=x_col,
-        y=data[y_col].cat.remove_unused_categories(),
+        y=y_data,
         hue=data[y_col],
         ax=axis,
         fill=True,

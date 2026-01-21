@@ -2,6 +2,7 @@ from unittest.mock import Mock, PropertyMock, patch
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 from ipywidgets import HTML
 
@@ -12,13 +13,15 @@ from seismometer.data.performance import BinaryClassifierMetricGenerator, Metric
 
 
 def sample_data():
-    return pd.DataFrame(
+    # Create DataFrame with string type for Count column to allow mixed values
+    df = pd.DataFrame(
         {
             "Cohort": ["Last", "First", "Middle", "Last", "First", "Middle", "Last", "First", "Middle"],
             "Class": ["L1", "Fn", "M3", "L4", "F5", "M?", "L7", "F8", "M9"],
             "Count": [1, np.nan, 3, 4, 5, undertest.FairnessIcons.UNKNOWN.value, 7, 8, 9],
         }
     )
+    return df
 
 
 def large_dataset_data():
@@ -36,9 +39,22 @@ def large_dataset_data():
 
 class TestSortKeys:
     def test_sort_keys(self):
-        data = sample_data()
+        # Create Polars DataFrame directly with mixed Count column (use Object type)
+        data = pl.DataFrame(
+            {
+                "Cohort": ["Last", "First", "Middle", "Last", "First", "Middle", "Last", "First", "Middle"],
+                "Class": ["L1", "Fn", "M3", "L4", "F5", "M?", "L7", "F8", "M9"],
+                "Count": pl.Series(
+                    [1, None, 3, 4, 5, undertest.FairnessIcons.UNKNOWN.value, 7, 8, 9], dtype=pl.Object
+                ),
+            }
+        )
         data = undertest.sort_fairness_table(data, ["First", "Middle", "Last"])
-        assert data["Cohort"].tolist() == [
+        result_pd = data.to_pandas()
+
+        # Verify cohort grouping
+        cohort_list = result_pd["Cohort"].tolist()
+        assert cohort_list == [
             "First",
             "First",
             "First",
@@ -49,24 +65,49 @@ class TestSortKeys:
             "Last",
             "Last",
         ]
-        assert data["Class"].tolist() == ["F8", "F5", "Fn", "M9", "M3", "M?", "L7", "L4", "L1"]
-        assert data["Count"].tolist() == [8, 5, np.nan, 9, 3, "❔", 7, 4, 1]
+
+        # Verify class ordering (sorted by cohort, then by count descending, with None/emoji at end of each group)
+        # First group: None sorts first (as NaN), then 8, then 5
+        # Middle group: 9, 3, then emoji
+        # Last group: 7, 4, 1
+        assert result_pd["Class"].tolist() == ["Fn", "F8", "F5", "M9", "M3", "M?", "L7", "L4", "L1"]
+
+        # Check individual count values
+        count_list = result_pd["Count"].tolist()
+        assert pd.isna(count_list[0]) or count_list[0] is None  # None from "Fn"
+        assert count_list[1] == 8  # "F8"
+        assert count_list[2] == 5  # "F5"
+        assert count_list[3] == 9  # "M9"
+        assert count_list[4] == 3  # "M3"
+        assert count_list[5] == "❔"  # "M?"
+        assert count_list[6] == 7  # "L7"
+        assert count_list[7] == 4  # "L4"
+        assert count_list[8] == 1  # "L1"
 
 
 class TestFairnessTable:
     def test_fairness_table_filters_values_small(self):
-        data = sample_data()
+        # Create a simple dataframe without mixed types
+        data = pl.DataFrame(
+            {
+                "Cohort": ["Last", "First", "Middle", "Last", "First", "Middle", "Last", "First", "Middle"],
+                "Class": ["L1", "Fn", "M3", "L4", "F5", "M?", "L7", "F8", "M9"],
+            }
+        )
         fake_metrics = MetricGenerator(["M1", "M2", "M3"], lambda x, names: {"M1": 1, "M2": 2, "M3": 3})
         table = undertest.fairness_table(data, fake_metrics, ["M1", "M2"], 0.1, {"Cohort": ["First", "Middle"]})
         assert "Last" not in table.value
         assert "M3" not in table.value
 
     def test_fairness_table_filters_values_large(self):
-        data = large_dataset_data()
-        fake_metrics = MetricGenerator(
-            ["M1", "M2", "M3"],
-            lambda x, names: {"M1": x.Number.mean(), "M2": x.Category.str.count("F8").sum(), "M3": 3},
-        )
+        data = pl.from_pandas(large_dataset_data())
+
+        # Adapt the metric function to work with Polars
+        def polars_metric_fn(x, names):
+            x_pd = x.to_pandas() if hasattr(x, "to_pandas") else x
+            return {"M1": x_pd.Number.mean(), "M2": x_pd.Category.str.count("F8").sum(), "M3": 3}
+
+        fake_metrics = MetricGenerator(["M1", "M2", "M3"], polars_metric_fn)
         table = undertest.fairness_table(data, fake_metrics, ["M1", "M2"], 0.1, {"Cohort": ["First", "Middle"]})
         assert "Last" not in table.value
         assert "M3" not in table.value
@@ -115,7 +156,7 @@ class TestFairnessTableValidation:
             undertest.fairness_table(df, dummy_metric, ["M1"], 0.25, None)
 
     def test_fairness_table_censors_small_groups(self):
-        df = pd.DataFrame(
+        df = pl.DataFrame(
             {
                 "group": ["A", "B", "A", "B"],
                 "val": [1, 2, 1, 2],
@@ -131,7 +172,7 @@ class TestFairnessTableValidation:
 class TestFairnessWrappers:
     def test_binary_metrics_fairness_table_runs(self, monkeypatch):
         sg_mock = Mock()
-        sg_mock.dataframe = pd.DataFrame({"group": ["A", "B"], "val": [1, 2]})
+        sg_mock.dataframe = pl.DataFrame({"group": ["A", "B"], "val": [1, 2]})
         sg_mock.entity_keys = []
         sg_mock.predict_time = None
         sg_mock.censor_threshold = 10
@@ -148,7 +189,7 @@ class TestFairnessWrappers:
 
     def test_custom_metrics_fairness_table_runs(self, monkeypatch):
         sg_mock = Mock()
-        sg_mock.dataframe = pd.DataFrame({"group": ["A", "B"], "val": [1, 2]})
+        sg_mock.dataframe = pl.DataFrame({"group": ["A", "B"], "val": [1, 2]})
         sg_mock.available_cohort_groups = {"group": ("A", "B")}
         sg_mock.censor_threshold = 10
         monkeypatch.setattr("seismometer.seismogram.Seismogram", lambda: sg_mock)

@@ -137,7 +137,11 @@ class TestTemplates:
     def test_score_target_levels_and_index_variants(self, fake_seismo):
         thresholds = fake_seismo.thresholds
         prediction_col = "prediction"
-        expected_cut = pd.cut(fake_seismo.dataframe[prediction_col], [0] + thresholds + [1])
+        # Convert to pandas for pd.cut
+        prediction_series = fake_seismo.dataframe[prediction_col]
+        if hasattr(prediction_series, "to_pandas"):
+            prediction_series = prediction_series.to_pandas()
+        expected_cut = pd.cut(prediction_series, [0] + thresholds + [1])
 
         # by_score=False, by_target=False
         g1, gg1, idx1 = undertest._score_target_levels_and_index("cohort1", False, False)
@@ -163,7 +167,11 @@ class TestTemplates:
         # by_target=True, by_score=True
         expected_target = fake_seismo.target  # event1_Value
         g4, gg4, idx4 = undertest._score_target_levels_and_index("cohort1", True, True)
-        expected_cut2 = pd.cut(fake_seismo.dataframe[prediction_col], [0] + thresholds + [1])
+        # Convert to pandas for pd.cut
+        prediction_series2 = fake_seismo.dataframe[prediction_col]
+        if hasattr(prediction_series2, "to_pandas"):
+            prediction_series2 = prediction_series2.to_pandas()
+        expected_cut2 = pd.cut(prediction_series2, [0] + thresholds + [1])
 
         assert g4[0] == "cohort1"
         assert isinstance(g4[1], pd.Series)

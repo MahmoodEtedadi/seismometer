@@ -6,10 +6,11 @@ from abc import ABC
 from importlib.resources import files as _files
 from pathlib import Path
 
+import pandas as pd
+import polars as pl
 from IPython.display import HTML as IPyHTML
 from IPython.display import IFrame, display
 from ipywidgets import HTML, Button, ButtonStyle, GridBox, Layout
-from pandas import DataFrame
 from seaborn.utils import relative_luminance
 
 import seismometer.report
@@ -22,25 +23,25 @@ PROFILING_CONFIG_PATH = _files(seismometer.report) / "report_config.yml"
 logger = logging.getLogger("seismometer")
 
 
-def filter_unsupported_columns(df: DataFrame) -> DataFrame:
+def filter_unsupported_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
     Filters out columns that are not supported by ydata-profiling.
 
     Parameters
     ----------
-    df : DataFrame
+    df : pd.DataFrame
         A Pandas DataFrame object.
 
     Returns
     -------
-    DataFrame
+    pd.DataFrame
         A Pandas DataFrame object with unsupported columns removed.
     """
     return df.select_dtypes(exclude=["datetime", "datetimetz", "datetime64[ns]"])
 
 
 class ReportWrapper(ABC):
-    _df: DataFrame
+    _df: pd.DataFrame
     _html_path: str
     _pickle_path: str
     _report: "ProfileReport"
@@ -67,8 +68,8 @@ class ReportWrapper(ABC):
 class ComparisonReportWrapper(ReportWrapper):
     def __init__(
         self,
-        l_df: DataFrame,
-        r_df: DataFrame,
+        l_df: pl.DataFrame,
+        r_df: pl.DataFrame,
         output_path: Path,
         l_title: str = "Left",
         r_title: str = "Right",
@@ -85,8 +86,8 @@ class ComparisonReportWrapper(ReportWrapper):
 
         Parameters
         ----------
-        df : DataFrame
-            A Pandas DataFrame object.
+        df : pl.DataFrame
+            A Polars DataFrame object.
         output_path: Path
             Location to store the report.
         l_compare_col : str
@@ -103,8 +104,12 @@ class ComparisonReportWrapper(ReportWrapper):
             Base title for the report, by default "Feature Report".
         """
 
-        self._l_df = filter_unsupported_columns(l_df)
-        self._r_df = filter_unsupported_columns(r_df)
+        # ONLY conversion point for ydata-profiling compatibility
+        # Handle both pandas and polars DataFrames
+        l_pd = l_df if isinstance(l_df, pd.DataFrame) else l_df.to_pandas()
+        r_pd = r_df if isinstance(r_df, pd.DataFrame) else r_df.to_pandas()
+        self._l_df = filter_unsupported_columns(l_pd)
+        self._r_df = filter_unsupported_columns(r_pd)
         self._l_title = l_title
         self._r_title = r_title
         self._exclude_cols = exclude_cols
@@ -150,7 +155,7 @@ class SingleReportWrapper(ReportWrapper):
 
     def __init__(
         self,
-        df: DataFrame,
+        df: pl.DataFrame,
         output_path: Path,
         exclude_cols: list[str] = None,
         title: str = "Report",
@@ -162,8 +167,8 @@ class SingleReportWrapper(ReportWrapper):
 
         Parameters
         ----------
-        df : DataFrame
-            A pandas DataFrame object.
+        df : pl.DataFrame
+            A Polars DataFrame object.
         exclude_cols : Optional[list[str]], optional
             Columns to exclude from profiling, by default None.
         title : str, optional
@@ -171,7 +176,10 @@ class SingleReportWrapper(ReportWrapper):
         alert_config : Optional[AlertConfigProvider], optional
             The parsed configuration for determining which alerts are shown, by default None.
         """
-        self._df = filter_unsupported_columns(df)
+        # ONLY conversion point for ydata-profiling compatibility
+        # Handle both pandas and polars DataFrames
+        pd_df = df if isinstance(df, pd.DataFrame) else df.to_pandas()
+        self._df = filter_unsupported_columns(pd_df)
         self._title = title
         self._html_path = output_path / (slugify(title) + ".html")
         self._alert_path = output_path / (slugify(title) + "_alerts.json")

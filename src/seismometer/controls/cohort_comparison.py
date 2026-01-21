@@ -89,7 +89,7 @@ class ComparisonReportGenerator:
             l_df = l_cohort.filter(sg.dataframe)
             r_df = r_cohort.filter(sg.dataframe)
 
-            if l_df.empty:
+            if l_df.height == 0:  # Polars uses .height instead of .empty
                 logger.warning(
                     f"No comparison report generated. The left selection ({l_title}) has no data to profile."
                 )
@@ -97,7 +97,7 @@ class ComparisonReportGenerator:
                 self.button.disabled = False
                 return
 
-            if r_df.empty:
+            if r_df.height == 0:  # Polars uses .height instead of .empty
                 logger.warning(
                     f"No comparison report generated. The right selection ({r_title}) has no data to profile."
                 )

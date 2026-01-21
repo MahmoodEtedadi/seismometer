@@ -2,6 +2,7 @@ from functools import partial
 from typing import Any, Optional, Union
 
 import pandas as pd
+import polars as pl
 
 
 def apply_column_comparison(data: pd.DataFrame, column: str, value: Any, op: str) -> pd.Series:
@@ -240,20 +241,33 @@ class FilterRule(object):
             case _:  # relation is checked in __init__, this should never be reached
                 raise ValueError(f"Unknown relation {self.relation}")
 
-    def filter(self, data: pd.DataFrame) -> pd.DataFrame:
+    def filter(self, data):
         """
         Filters a dataframe to only the rows matching the FilterRule.
 
+        Supports both pandas and Polars DataFrames.
+
         Parameters
         ----------
-        data : pd.DataFrame
+        data : pd.DataFrame or pl.DataFrame
             DataFrame to filter.
 
         Returns
         -------
-        pd.DataFrame
-            Filtered DataFrame.
+        pd.DataFrame or pl.DataFrame
+            Filtered DataFrame (same type as input).
         """
+        # Handle Polars DataFrames
+        if isinstance(data, pl.DataFrame):
+            mask = self._mask_polars(data)
+            df = data.filter(mask)
+            if (not self.MIN_ROWS) or (len(df) > self.MIN_ROWS):
+                return df
+            else:
+                # Return empty DataFrame with same schema
+                return df[:0]
+
+        # Handle pandas DataFrames
         df = data.loc[self.mask(data)]
         if (not self.MIN_ROWS) or (len(df) > self.MIN_ROWS):
             return df
@@ -276,6 +290,72 @@ class FilterRule(object):
         """
         relation = FilterRule.method_router[self.relation]
         return relation(data, self.left, self.right)
+
+    def _mask_polars(self, data: pl.DataFrame) -> pl.Expr:
+        """
+        Creates a Polars expression for filtering based on the FilterRule.
+
+        Parameters
+        ----------
+        data : pl.DataFrame
+            Polars DataFrame to create mask for.
+
+        Returns
+        -------
+        pl.Expr
+            Boolean expression for filtering.
+        """
+        match self.relation:
+            case "all":
+                return pl.lit(True)
+            case "none":
+                return pl.lit(False)
+            case "and":
+                return self.left._mask_polars(data) & self.right._mask_polars(data)
+            case "or":
+                return self.left._mask_polars(data) | self.right._mask_polars(data)
+            case "==":
+                return pl.col(self.left) == self.right
+            case "!=":
+                return pl.col(self.left) != self.right
+            case "<":
+                return pl.col(self.left) < self.right
+            case ">":
+                return pl.col(self.left) > self.right
+            case "<=":
+                return pl.col(self.left) <= self.right
+            case ">=":
+                return pl.col(self.left) >= self.right
+            case "isin":
+                return pl.col(self.left).is_in(self.right)
+            case "notin":
+                return ~pl.col(self.left).is_in(self.right)
+            case "isna":
+                return pl.col(self.left).is_null()
+            case "notna":
+                return pl.col(self.left).is_not_null()
+            case "topk":
+                # Get top k most frequent values
+                top_values = (
+                    data.group_by(self.left)
+                    .agg(pl.count().alias("__count"))
+                    .sort(["__count", self.left], descending=[True, False])
+                    .head(self.right)[self.left]
+                    .to_list()
+                )
+                return pl.col(self.left).is_in(top_values)
+            case "nottopk":
+                # Get top k most frequent values and negate
+                top_values = (
+                    data.group_by(self.left)
+                    .agg(pl.count().alias("__count"))
+                    .sort(["__count", self.left], descending=[True, False])
+                    .head(self.right)[self.left]
+                    .to_list()
+                )
+                return ~pl.col(self.left).is_in(top_values)
+            case _:
+                raise ValueError(f"Unknown relation {self.relation}")
 
     def __or__(left, right) -> "FilterRule":
         if left == right:

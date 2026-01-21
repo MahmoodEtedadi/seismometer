@@ -87,15 +87,31 @@ class Test_Performance_Data:
     def test_data_defaults(self):
         df = input_df()
         actual = undertest.get_cohort_performance_data(df, "tri", proba="col1", censor_threshold=0)
-        actual = actual.drop(columns=THRESHOLD_DEPENDENT_COLUMNS)
+        actual = actual.drop(THRESHOLD_DEPENDENT_COLUMNS)  # Polars syntax
         expected = expected_df(["<1.0", ">=1.0"])
 
-        pd.testing.assert_frame_equal(actual, expected, check_column_type=False, check_like=True, check_dtype=False)
+        # Convert to pandas for comparison (Polars categoricals become object dtype)
+        pd.testing.assert_frame_equal(
+            actual.to_pandas(),
+            expected,
+            check_column_type=False,
+            check_like=True,
+            check_dtype=False,
+            check_categorical=False,
+        )
 
     def test_data_splits(self):
         df = input_df()
         actual = undertest.get_cohort_performance_data(df, "tri", proba="col1", splits=[1.0, 2.0], censor_threshold=0)
-        actual = actual.drop(columns=THRESHOLD_DEPENDENT_COLUMNS)
+        actual = actual.drop(THRESHOLD_DEPENDENT_COLUMNS)  # Polars syntax
         expected = expected_df(["<1.0", "1.0-2.0", ">=2.0"])
 
-        pd.testing.assert_frame_equal(actual, expected, check_column_type=False, check_like=True, check_dtype=False)
+        # Convert to pandas for comparison (Polars categoricals become object dtype)
+        pd.testing.assert_frame_equal(
+            actual.to_pandas(),
+            expected,
+            check_column_type=False,
+            check_like=True,
+            check_dtype=False,
+            check_categorical=False,
+        )

@@ -2,6 +2,7 @@ import logging
 from unittest.mock import Mock, patch
 
 import pandas as pd
+import polars as pl
 import pytest
 
 import seismometer.seismogram  # noqa : needed for patching
@@ -261,7 +262,8 @@ class TestSeismogramCreateCohorts:
         # Arrange
         sg = Seismogram()
         sg.dataframe = get_test_data()
-        sg.dataframe["card3"] = [0, 1, 2, 2]
+        # Use with_columns for Polars compatibility
+        sg.dataframe = sg.dataframe.with_columns(pl.Series("card3", [0, 1, 2, 2]))
         sg.config.cohorts = sg.config.cohorts + [Cohort(source="card3")]
 
         # Act
@@ -278,7 +280,8 @@ class TestSeismogramCreateCohorts:
         # Arrange
         sg = Seismogram()
         sg.dataframe = get_test_data()
-        sg.dataframe["uniqVals"] = [0, 1, 2, 3]
+        # Use with_columns for Polars compatibility
+        sg.dataframe = sg.dataframe.with_columns(pl.Series("uniqVals", [0, 1, 2, 3]))
         sg.config.censor_min_count = 1
         sg.config.cohorts = sg.config.cohorts + [Cohort(source="uniqVals")]
 
@@ -296,7 +299,8 @@ class TestSeismogramCreateCohorts:
         # Arrange
         sg = Seismogram()
         sg.dataframe = get_test_data()
-        sg.dataframe["rareVals"] = pd.Series([0, 0, 0, 1], dtype=bool)
+        # Use with_columns for Polars compatibility
+        sg.dataframe = sg.dataframe.with_columns(pl.Series("rareVals", [False, False, False, True]))
         sg.config.censor_min_count = 1
         sg.config.cohorts = sg.config.cohorts + [Cohort(source="rareVals")]
 
@@ -512,12 +516,12 @@ class TestSeismogramLoadData:
         sg.load_data()
 
         assert "cohort1" in sg.available_cohort_groups
-        assert isinstance(sg.dataframe, pd.DataFrame)
+        assert isinstance(sg.dataframe, pl.DataFrame)
         Seismogram.kill()
 
     def test_load_data_does_not_reload_if_data_present(self, fake_seismo):
         sg = Seismogram()
-        sg.dataframe = pd.DataFrame({"entity": [1]})
+        sg.dataframe = pl.DataFrame({"entity": [1]})
 
         with patch.object(sg, "_load_metadata") as mock_meta, patch.object(sg.dataloader, "load_data") as mock_loader:
             sg.load_data()
@@ -550,7 +554,7 @@ class TestSeismogramLoadData:
 
         sg.load_data(reset=True)
 
-        assert sg.dataframe["entity"].iloc[0] == 2
+        assert sg.dataframe["entity"][0] == 2
         Seismogram.kill()
 
     def test_warns_and_defaults_on_missing_thresholds(self, tmp_path, fake_seismo, caplog):
@@ -809,8 +813,15 @@ class TestSeismogramBuildCohortHierarchyCombinations:
         assert actual_keys == expected_keys
 
         for key in expected_keys:
-            actual_df = sg.cohort_hierarchy_combinations[key].reset_index(drop=True)
-            expected_df = expected_results[key].reset_index(drop=True)
+            actual_df = sg.cohort_hierarchy_combinations[key]
+            expected_df = expected_results[key]
+            # Convert to pandas for comparison if needed
+            if hasattr(actual_df, "to_pandas"):
+                actual_df = actual_df.to_pandas()
+            if hasattr(expected_df, "to_pandas"):
+                expected_df = expected_df.to_pandas()
+            actual_df = actual_df.reset_index(drop=True)
+            expected_df = expected_df.reset_index(drop=True)
             pd.testing.assert_frame_equal(actual_df, expected_df)
 
 
@@ -844,10 +855,21 @@ class TestSeismogram:
             if display_col not in sg.dataframe.columns:
                 continue  # skipped due to censoring or config
 
-            source_counts = sg.dataframe[source_col].value_counts(sort=False).sort_index()
-            display_counts = sg.dataframe[display_col].value_counts(sort=False).sort_index()
+            # Polars value_counts returns a DataFrame with columns [value, count]
+            source_counts_df = sg.dataframe[source_col].value_counts(sort=False).sort(source_col)
+            display_counts_df = sg.dataframe[display_col].value_counts(sort=False).sort(display_col)
+
+            # Convert to dict: {value: count}, converting values to strings for comparison
+            # since cohorts are converted to categorical strings
+            source_counts = {
+                str(k): v for k, v in zip(source_counts_df[source_col].to_list(), source_counts_df["count"].to_list())
+            }
+            display_counts = {
+                str(k): v
+                for k, v in zip(display_counts_df[display_col].to_list(), display_counts_df["count"].to_list())
+            }
 
             mismatch_msg = f"Counts for {display_col} do not match {source_col} after filtering."
-            assert dict(display_counts) == dict(source_counts), mismatch_msg
+            assert display_counts == source_counts, mismatch_msg
         # Cleanup
         Seismogram.kill()

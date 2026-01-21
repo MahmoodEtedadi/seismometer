@@ -193,10 +193,27 @@ class BinaryClassifierMetricGenerator(MetricGenerator):
         y_true = dataframe[target_col]
         y_pred = dataframe[score_col]
         logger.info(f"data before using calculating stats has {len(y_true)} rows.")
-        keep = ~(np.isnan(y_true) | np.isnan(y_pred))
-        logger.info(f"Calculating stats drops {len(y_true)-len(y_true[keep])} rows.")
+        # Handle both pandas and polars series
+        if hasattr(y_true, "to_numpy"):
+            # Polars Series - convert to numpy for NaN checking
+            y_true_arr = y_true.to_numpy()
+            y_pred_arr = y_pred.to_numpy()
+            keep = ~(np.isnan(y_true_arr) | np.isnan(y_pred_arr))
+            logger.info(f"Calculating stats drops {len(y_true)-np.sum(keep)} rows.")
+            # Filter and convert to pandas for calculate_bin_stats
+            y_true_filtered = pd.Series(y_true_arr[keep])
+            y_pred_filtered = pd.Series(y_pred_arr[keep])
+        else:
+            # Pandas Series
+            keep = ~(np.isnan(y_true) | np.isnan(y_pred))
+            logger.info(f"Calculating stats drops {len(y_true)-len(y_true[keep])} rows.")
+            y_true_filtered = y_true[keep]
+            y_pred_filtered = y_pred[keep]
+
         stats = (
-            calculate_bin_stats(y_true, y_pred, rho=self.rho, threshold_precision=threshold_precision)
+            calculate_bin_stats(
+                y_true_filtered, y_pred_filtered, rho=self.rho, threshold_precision=threshold_precision
+            )
             .round(5)
             .set_index(THRESHOLD)
         )
@@ -292,6 +309,11 @@ def calculate_bin_stats(
     """
     rho = rho or DEFAULT_RHO
     y_true = y_true.astype(float)  # Expect numeric labels
+
+    # Convert to pandas if needed (should already be pandas from upstream, but be safe)
+    if hasattr(y_true, "to_pandas"):
+        y_true = y_true.to_pandas()
+        y_pred = y_pred.to_pandas()
 
     keep = ~(np.isnan(y_true) | np.isnan(y_pred))
     if not keep.any():

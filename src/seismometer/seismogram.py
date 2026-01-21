@@ -4,7 +4,7 @@ from functools import lru_cache
 from typing import Optional
 
 import numpy as np
-import pandas as pd
+import polars as pl
 
 from seismometer.configuration import AggregationStrategies, ConfigProvider, MergeStrategies
 from seismometer.configuration.model import CohortHierarchy, Metric
@@ -74,7 +74,7 @@ class Seismogram(object, metaclass=Singleton):
         self.dataloader = dataloader
 
         logger.debug("Initializing the empty dataframe.")
-        self.dataframe: pd.DataFrame = None
+        self.dataframe: pl.DataFrame = None
         self.cohort_cols: list[str] = []
         self.cohort_hierarchies: list[CohortHierarchy] = []
         self.cohort_hierarchy_combinations = {}
@@ -102,7 +102,7 @@ class Seismogram(object, metaclass=Singleton):
         self.selected_cohort = (None, None)  # column, values
 
     def load_data(
-        self, *, predictions: Optional[pd.DataFrame] = None, events: Optional[pd.DataFrame] = None, reset: bool = False
+        self, *, predictions: Optional[pl.DataFrame] = None, events: Optional[pl.DataFrame] = None, reset: bool = False
     ):
         """
         Loads the seismogram data.
@@ -112,10 +112,10 @@ class Seismogram(object, metaclass=Singleton):
 
         Parameters
         ----------
-        predictions : pd.DataFrame, optional
+        predictions : pl.DataFrame, optional
             The fully prepared predictions dataframe, by default None.
             Uses this when specified, otherwise loads based on configuration.
-        events : pd.DataFrame, optional
+        events : pl.DataFrame, optional
             The pre-loaded events dataframe, by default None.
             Uses this when specified, otherwise loads based on configuration.
         reset : bool, optional
@@ -138,21 +138,21 @@ class Seismogram(object, metaclass=Singleton):
         # UI Controls
         if self.cohort_cols:
             self.available_cohort_groups = {
-                cohort_attr: self.dataframe[cohort_attr].cat.categories.tolist() for cohort_attr in self.cohort_cols
+                cohort_attr: self.dataframe[cohort_attr].unique().sort().to_list() for cohort_attr in self.cohort_cols
             }
             self.selected_cohort = (self.cohort_cols[0], self.available_cohort_groups[self.cohort_cols[0]])
 
     # region data accessors
 
     @property
-    def events(self) -> pd.DataFrame:
+    def events(self) -> pl.DataFrame:
         """
         DataFrame of events which include the target event and other outcomes.
         """
         return self._events
 
     @events.setter
-    def events(self, df: pd.DataFrame):
+    def events(self, df: pl.DataFrame):
         self._events = df
 
     @property
@@ -254,7 +254,7 @@ class Seismogram(object, metaclass=Singleton):
         return self.config.comparison_time
 
     @property
-    def dataframe(self) -> pd.DataFrame:
+    def dataframe(self) -> pl.DataFrame:
         """
         The working dataframe core to the analyses.
 
@@ -267,7 +267,13 @@ class Seismogram(object, metaclass=Singleton):
         return self._dataframe
 
     @dataframe.setter
-    def dataframe(self, df: pd.DataFrame):
+    def dataframe(self, df: pl.DataFrame):
+        # Auto-convert pandas DataFrames to Polars for backward compatibility
+        if not isinstance(df, pl.DataFrame):
+            import pandas as pd
+
+            if isinstance(df, pd.DataFrame):
+                df = pl.from_pandas(df)
         self._dataframe = df
 
     @property
@@ -296,12 +302,12 @@ class Seismogram(object, metaclass=Singleton):
         return self._feature_counts
 
     @property
-    def start_time(self) -> pd.Timestamp:
+    def start_time(self):
         """Earliest prediction time."""
         return self._start_time
 
     @property
-    def end_time(self) -> pd.Timestamp:
+    def end_time(self):
         """Latest prediction time."""
         return self._end_time
 
@@ -317,7 +323,7 @@ class Seismogram(object, metaclass=Singleton):
 
     def _set_df_counts(self):
         self._prediction_count = len(self.dataframe)
-        self._entity_count = self.dataframe[self.entity_keys[0]].nunique()
+        self._entity_count = self.dataframe[self.entity_keys[0]].n_unique()
 
         feature_counts = len(self.config.features)
         if feature_counts > 0:
@@ -374,7 +380,7 @@ class Seismogram(object, metaclass=Singleton):
 
         self.modelname: str = self._metadata.get("modelname", "UNDEFINED MODEL")
 
-    def _apply_load_time_filters(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _apply_load_time_filters(self, df: pl.DataFrame) -> pl.DataFrame:
         """
         Applies all load-time filters by building a single composite mask for filtering.
         Returns a filtered DataFrame.
@@ -387,42 +393,66 @@ class Seismogram(object, metaclass=Singleton):
                 raise ValueError(f"Filter source column '{rule.source}' not found in data.")
         FilterRule.MAXIMUM_NUM_COHORTS = MAXIMUM_NUM_COHORTS
         filtered_df = FilterRule.from_filter_config_list(self.config.usage.load_time_filters).filter(df)
-        return filtered_df.reset_index(drop=True)
+        return filtered_df
 
     def create_cohorts(self) -> None:
         """Creates data columns for each cohort defined in configuration."""
         for cohort in self.config.cohorts:
             disp_attr = cohort.display_name
 
-            if cohort.source not in self.dataframe:
+            if cohort.source not in self.dataframe.columns:
                 logger.warning(f"Source column {cohort.source} not found in data; skipping cohort {disp_attr}.")
                 continue
+
+            # resolve_cohorts is now Polars native
+            source_col = self.dataframe[cohort.source]
+
+            # Ensure column is Polars Series (for test compatibility)
+            if not isinstance(source_col, pl.Series):
+                import pandas as pd
+
+                if isinstance(source_col, pd.Series):
+                    source_col = pl.Series(source_col.name, source_col.values)
+
             if cohort.splits:
                 try:
-                    new_col = resolve_cohorts(self.dataframe[cohort.source], cohort.splits)
+                    new_col = resolve_cohorts(source_col, cohort.splits)
                 except IndexError as exc:
                     logger.warning(f"Failed to resolve cohort {disp_attr}: {exc}")
                     continue
             else:
-                new_col = pd.Series(pd.Categorical(self.dataframe[cohort.source]))
+                # Cast to string first if not already string type
+                if source_col.dtype != pl.Utf8:
+                    new_col = source_col.cast(pl.Utf8).cast(pl.Categorical)
+                else:
+                    new_col = source_col.cast(pl.Categorical)
 
-            # validate counts (per observation)
-            if (N := len(new_col.cat.categories)) > MAXIMUM_NUM_COHORTS:  # More accurate if censor first
+            # validate counts (per observation) - Polars native
+            unique_vals = new_col.unique().drop_nulls()
+            if (N := len(unique_vals)) > MAXIMUM_NUM_COHORTS:
                 logger.warning(
                     f"Too many unique values to cohort {disp_attr}. Limit to {MAXIMUM_NUM_COHORTS} found {N}."
                 )
                 continue
-            sufficient = new_col.value_counts(sort=False) > self.censor_threshold
-            if not sufficient.any():
+
+            # Count occurrences per category
+            counts = new_col.value_counts()
+            sufficient_cats = counts.filter(pl.col("count") > self.censor_threshold)[new_col.name].to_list()
+
+            if len(sufficient_cats) == 0:
                 logger.warning(
                     f"No cohort on {disp_attr} met censor limit {self.censor_threshold}; dropping cohort option."
                 )
                 continue
-            if not sufficient.all():
-                log_details = ", ".join(sufficient[~sufficient].index.astype(str))
+
+            if len(sufficient_cats) < N:
+                insufficient_cats = set(unique_vals.to_list()) - set(sufficient_cats)
+                log_details = ", ".join(str(c) for c in insufficient_cats)
                 logger.warning(f"Some cohorts of {disp_attr} were below censor limit: {log_details}")
 
-            self.dataframe[disp_attr] = new_col.cat.set_categories(sufficient[sufficient].index.tolist(), ordered=True)
+            # Filter to valid categories and add to dataframe
+            filtered_col = pl.when(new_col.is_in(sufficient_cats)).then(new_col).otherwise(None).alias(disp_attr)
+            self.dataframe = self.dataframe.with_columns(filtered_col.cast(pl.Categorical))
             self.cohort_cols.append(disp_attr)
         logger.debug(f"Created cohorts: {', '.join(self.cohort_cols)}")
         self._validate_and_resolve_cohort_hierarchies()
@@ -455,7 +485,7 @@ class Seismogram(object, metaclass=Singleton):
             if not all(k in self.dataframe.columns for k in lvls):
                 continue  # skip invalid ones
             lvls = [source_to_display[lvl] for lvl in lvls]
-            combinations_df = self.dataframe[lvls].dropna().drop_duplicates().sort_values(lvls).reset_index(drop=True)
+            combinations_df = self.dataframe.select(lvls).drop_nulls().unique().sort(lvls)
             self.cohort_hierarchy_combinations[tuple(lvls)] = combinations_df
 
     def _is_binary_array(self, arr):
@@ -478,7 +508,7 @@ class Seismogram(object, metaclass=Singleton):
     def _is_ordinal_categorical_metric(self, metric, max_cat_size):
         if self.metrics[metric].type != "ordinal/categorical":
             return False
-        limit_is_respected = self.dataframe[metric].nunique() <= max_cat_size
+        limit_is_respected = self.dataframe[metric].n_unique() <= max_cat_size
         if not limit_is_respected:
             logger.warning(
                 f"Dropping the ordinal/categorical metric {metric}, as it has more than {max_cat_size} categories."

@@ -1,11 +1,37 @@
 from pathlib import Path
 
 import pandas as pd
+import polars as pl
 import pytest
 
 import seismometer.data.pandas_helpers as undertest
 
 RES_SUB_DIR = Path("data") / "score_selection"
+
+
+def _to_pandas(df):
+    """Convert Polars DataFrame to pandas for test assertions."""
+    if isinstance(df, pl.DataFrame):
+        return df.to_pandas()
+    return df
+
+
+def _assert_frame_equal_sorted(actual, expected, sort_by=None):
+    """
+    Assert DataFrames are equal after sorting by specified columns.
+    If sort_by is None, sorts by all columns.
+    """
+    actual = _to_pandas(actual).reset_index(drop=True)
+    expected = expected.reset_index(drop=True)
+
+    if sort_by is None:
+        # Sort by all columns to ensure consistent ordering
+        sort_by = list(actual.columns)
+
+    actual = actual.sort_values(by=sort_by).reset_index(drop=True)
+    expected = expected.sort_values(by=sort_by).reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(actual, expected)
 
 
 @pytest.fixture
@@ -46,6 +72,8 @@ class Test_Event_Score:
             input_frame, ["Id", "CtxId"], "ModelScore", ref_time, ref_event, aggregation_method
             )
 
+        # Convert Polars to pandas for assertion
+        actual = _to_pandas(actual)
         assert actual["ModelScore"].tolist() == expected_score.tolist()
 
     @pytest.mark.parametrize(
@@ -100,7 +128,8 @@ class Test_Event_Score:
         actual = undertest.event_score(
             input_frame, ["Id", "CtxId"], "ModelScore", "EventTime", "Target", aggregation_method=aggregation_method
         )
-        pd.testing.assert_frame_equal(actual, expected)
+        # Assert with sorting to handle row order differences
+        _assert_frame_equal_sorted(actual, expected, sort_by=["Id", "CtxId"])
 
     @pytest.mark.parametrize(
         "entities,scores,targets,selected_rows",
@@ -124,7 +153,8 @@ class Test_Event_Score:
         )
         expected = input_frame.loc[pd.Index(selected_rows)]
         actual = undertest.max_aggregation(input_frame, ["Id", "CtxId"], "ModelScore", None, "Target")
-        pd.testing.assert_frame_equal(actual, expected)
+        # Assert with sorting to handle row order differences
+        _assert_frame_equal_sorted(actual, expected, sort_by=["Id", "CtxId"])
 
     @pytest.mark.parametrize(
         "entities,scores,targets,selected_rows",
@@ -148,7 +178,8 @@ class Test_Event_Score:
         )
         expected = input_frame.loc[pd.Index(selected_rows)]
         actual = undertest.min_aggregation(input_frame, ["Id", "CtxId"], "ModelScore", None, "Target")
-        pd.testing.assert_frame_equal(actual, expected)
+        # Assert with sorting to handle row order differences
+        _assert_frame_equal_sorted(actual, expected, sort_by=["Id", "CtxId"])
 
     @pytest.mark.parametrize(
         "entities,scores,ref_times,selected_rows",
@@ -171,7 +202,8 @@ class Test_Event_Score:
         )
         expected = input_frame.loc[pd.Index(selected_rows)]
         actual = undertest.first_aggregation(input_frame, ["Id", "CtxId"], "ModelScore", "EventTime", None)
-        pd.testing.assert_frame_equal(actual, expected)
+        # Assert with sorting to handle row order differences
+        _assert_frame_equal_sorted(actual, expected, sort_by=["Id", "CtxId"])
 
     @pytest.mark.parametrize(
         "entities,scores,ref_times,selected_rows",
@@ -194,7 +226,8 @@ class Test_Event_Score:
         )
         expected = input_frame.loc[pd.Index(selected_rows)]
         actual = undertest.last_aggregation(input_frame, ["Id", "CtxId"], "ModelScore", "EventTime", None)
-        pd.testing.assert_frame_equal(actual, expected)
+        # Assert with sorting to handle row order differences
+        _assert_frame_equal_sorted(actual, expected, sort_by=["Id", "CtxId"])
 
     @pytest.mark.parametrize(
         "aggregation_method, expected_rows",
@@ -234,7 +267,8 @@ class Test_Event_Score:
                 input_frame, ["Id", "CtxId"], "ModelScore", "EventTime", "Target_Value"
                 )
 
-        pd.testing.assert_frame_equal(actual, expected)
+        # Assert with sorting to handle row order differences
+        _assert_frame_equal_sorted(actual, expected, sort_by=["Id", "CtxId"])
 
     def test_invalid_aggregation_method(self):
         input_frame = pd.DataFrame(

@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, Mock, patch
 
 import pandas as pd
+import polars as pl
 import pytest
 from IPython.display import HTML, SVG
 from ipywidgets import HTML as WidgetHTML
@@ -88,7 +89,8 @@ def get_test_loader(config):
 
 
 def get_test_data():
-    return pd.DataFrame(
+    # Create pandas DataFrame first for easier construction
+    df = pd.DataFrame(
         {
             "entity": ["A", "A", "B", "C"],
             "context_id": ["ctx1", "ctx1", "ctx1", "ctx2"],
@@ -114,6 +116,11 @@ def get_test_data():
             "target3": [1, 1, 1, 0],
         }
     )
+    # Convert time columns to datetime before converting to Polars
+    df["time"] = pd.to_datetime(df["time"])
+    df["event1_Time"] = pd.to_datetime(df["event1_Time"])
+    # Let auto-conversion handle it (or convert explicitly if needed)
+    return df
 
 
 @pytest.fixture
@@ -122,9 +129,7 @@ def fake_seismo(tmp_path):
     loader = get_test_loader(config)
     sg = Seismogram(config, loader)
     df = get_test_data()
-    # Convert time columns to datetime
-    df["time"] = pd.to_datetime(df["time"])
-    df["event1_Time"] = pd.to_datetime(df["event1_Time"])
+    # Dataframe setter will auto-convert pandas to Polars
     sg.dataframe = df
     sg.create_cohorts()
     sg.thresholds = [0.2]
@@ -160,7 +165,7 @@ class TestExploreSubgroups:
             "seismometer.html.template.render_censored_plot_message", return_value=HTML("censored")
         ) as mock_render:
             rule = MagicMock()
-            rule.filter.return_value = fake_seismo.dataframe.iloc[:0]  # no rows
+            rule.filter.return_value = fake_seismo.dataframe[:0]  # no rows (Polars uses array slicing)
             mock_filter.return_value = rule
 
             result = cohort_list_details({"Cohort": ["C1", "C2"]})
@@ -278,8 +283,8 @@ class TestExploreBinaryModelMetrics:
     def test_plot_binary_classifier_metrics_nonbinary_target(
         self, mock_event_value, mock_filter, mock_render, fake_seismo
     ):
-        df = fake_seismo.dataframe.copy()
-        df["event1_Value"] = 1  # only one class present
+        df = fake_seismo.dataframe.clone()
+        df = df.with_columns(pl.lit(1).alias("event1_Value"))  # only one class present
 
         mock_filter.return_value = df
 
@@ -302,8 +307,8 @@ class TestExploreModelEvaluation:
     @patch("seismometer.html.template.render_title_message", return_value=HTML("requires exactly two classes"))
     @patch("seismometer.data.filter.FilterRule.filter")
     def test_model_evaluation_not_binary_target(self, mock_filter, mock_render, fake_seismo):
-        df = fake_seismo.dataframe.copy()
-        df["event1_Value"] = 1  # single class
+        df = fake_seismo.dataframe.clone()
+        df = df.with_columns(pl.lit(1).alias("event1_Value"))  # single class
         mock_filter.return_value = df
 
         result = _model_evaluation(
@@ -338,8 +343,8 @@ class TestExploreModelEvaluation:
     @patch("seismometer.html.template.render_title_with_image", return_value=HTML("rendered"))
     @patch("seismometer.data.filter.FilterRule.filter")
     def test_model_evaluation_valid_path(self, mock_filter, mock_render, mock_plot, mock_scores, fake_seismo):
-        df = fake_seismo.dataframe.copy()
-        df["event1_Value"] = [0, 1, 1, 0]  # binary target
+        df = fake_seismo.dataframe.clone()
+        df = df.with_columns(pl.lit(pl.Series([0, 1, 1, 0])).alias("event1_Value"))  # binary target
         mock_filter.return_value = df
         mock_scores.return_value = df
 
@@ -382,7 +387,7 @@ class TestExploreModelScoreComparison:
         fake_seismo,
     ):
         # Base input DataFrame with expected columns
-        df = fake_seismo.dataframe[["score1", "event1_Value"]].copy()
+        df = fake_seismo.dataframe[["score1", "event1_Value"]].clone()
 
         # Mocks return real data for processing
         mock_from_dict.return_value = MagicMock()
@@ -425,7 +430,7 @@ class TestExploreModelTargetComparison:
         fake_seismo,
     ):
         # Input DataFrame
-        df = fake_seismo.dataframe[["score1", "event1_Value"]].copy()
+        df = fake_seismo.dataframe[["score1", "event1_Value"]].clone()
 
         # Mocked behaviors
         mock_from_dict.return_value = MagicMock()
@@ -459,7 +464,7 @@ class TestExploreCohortEvaluation:
         mock_render,
         fake_seismo,
     ):
-        df = fake_seismo.dataframe.copy()
+        df = fake_seismo.dataframe.clone()
         mock_get_scores.return_value = df
         mock_get_perf.return_value = _mock_perf_df
 
@@ -492,7 +497,7 @@ class TestExploreCohortEvaluation:
         mock_render,
         fake_seismo,
     ):
-        df = fake_seismo.dataframe.copy()
+        df = fake_seismo.dataframe.clone()
         mock_get_scores.return_value = df
         mock_get_perf.return_value = _mock_perf_df
 
@@ -540,7 +545,7 @@ class TestExploreCohortHistograms:
     @patch("seismometer.html.template.render_censored_plot_message", return_value=HTML("censored"))
     def test_plot_cohort_hist_censored_after_filter(self, mock_render, fake_seismo):
         # Simulate filtered-out result
-        empty_df = fake_seismo.dataframe.iloc[0:0].copy()
+        empty_df = fake_seismo.dataframe[0:0].clone()  # Polars uses array slicing and .clone()
 
         result = _plot_cohort_hist(
             dataframe=empty_df,
@@ -558,8 +563,8 @@ class TestExploreCohortHistograms:
     @patch("seismometer.api.plots.get_cohort_data")
     def test_plot_cohort_hist_plot_fails(self, mock_get_cohort_data, mock_plot, mock_render, fake_seismo):
         with patch("seismometer.api.plots.plot.histogram_stacked", return_value=None):
-            # Simulate the output of get_cohort_data
-            mock_df = pd.DataFrame({"cohort": ["C1"] * 11 + ["C2"] * 11, "pred": [0.1] * 11 + [0.2] * 11})
+            # Simulate the output of get_cohort_data - should be a Polars DataFrame
+            mock_df = pl.DataFrame({"cohort": ["C1"] * 11 + ["C2"] * 11, "pred": [0.1] * 11 + [0.2] * 11})
             mock_get_cohort_data.return_value = mock_df
 
             result = _plot_cohort_hist(
@@ -610,7 +615,7 @@ class TestExploreCohortLeadTime:
         mock_plot.assert_called_once()
 
     def test_leadtime_enc_missing_target_column(self, fake_seismo, caplog):
-        df = fake_seismo.dataframe.drop(columns=["event1_Value"])
+        df = fake_seismo.dataframe.drop(["event1_Value"])  # Polars doesn't use columns parameter
         with caplog.at_level("ERROR"):
             result = _plot_leadtime_enc(
                 df,
@@ -629,7 +634,7 @@ class TestExploreCohortLeadTime:
         assert "Target event (event1_Value) not found" in caplog.text
 
     def test_leadtime_enc_missing_target_zero_column(self, fake_seismo, caplog):
-        df = fake_seismo.dataframe.drop(columns=["event1_Time"])
+        df = fake_seismo.dataframe.drop(["event1_Time"])  # Polars doesn't use columns parameter
         with caplog.at_level("ERROR"):
             result = _plot_leadtime_enc(
                 df,
@@ -648,8 +653,8 @@ class TestExploreCohortLeadTime:
         assert "Target event time-zero (event1_Time) not found" in caplog.text
 
     def test_leadtime_enc_no_positive_events(self, fake_seismo, caplog):
-        df = fake_seismo.dataframe.copy()
-        df["event1_Value"] = 0  # force all negative
+        df = fake_seismo.dataframe.clone()
+        df = df.with_columns(pl.lit(0).alias("event1_Value"))  # force all negative
         with caplog.at_level("ERROR"):
             result = _plot_leadtime_enc(
                 df,

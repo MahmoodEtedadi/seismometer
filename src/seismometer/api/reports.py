@@ -174,11 +174,11 @@ def target_feature_summary(exclude_cols: list[str] = None, inline=False):
     negative_target_df = negative_target.filter(sg.dataframe)
     positive_target_df = positive_target.filter(sg.dataframe)
 
-    if negative_target_df.empty:
+    if negative_target_df.height == 0:  # Polars uses .height instead of .empty
         logger.warning("No comparison report generated. The negative target has no data to profile.")
         return
 
-    if positive_target_df.empty:
+    if positive_target_df.height == 0:  # Polars uses .height instead of .empty
         logger.warning("No comparison report generated. The positive target has no data to profile.")
         return
 

@@ -81,6 +81,13 @@ def _style_cohort_summaries(df: pd.DataFrame, attribute: str) -> Styler:
     Styler
         Styled dataframe.
     """
+    # Convert to pandas for styling
+    if hasattr(df, "to_pandas"):
+        df = df.to_pandas()
+        # Set the attribute column as index
+        if attribute in df.columns:
+            df = df.set_index(attribute)
+
     df.index = df.index.rename("Cohort")
     style = df.style.format(precision=2)
     style = style.format_index(precision=2)
@@ -112,7 +119,11 @@ def _score_target_levels_and_index(
     sg = Seismogram()
 
     score_bins = sg.score_bins()
-    cut_bins = pd.cut(sg.dataframe[sg.output], score_bins)
+    # Convert to pandas Series if needed for pd.cut
+    output_col = sg.dataframe[sg.output]
+    if hasattr(output_col, "to_pandas"):
+        output_col = output_col.to_pandas()
+    cut_bins = pd.cut(output_col, score_bins)
 
     groupby_groups = [selected_attribute]
     grab_groups = [selected_attribute]
@@ -149,6 +160,14 @@ def _style_score_target_cohort_summaries(df: pd.DataFrame, index_rename: list[st
     Styler
         Styled dataframe.
     """
+    # Convert to pandas for styling
+    if hasattr(df, "to_pandas"):
+        df = df.to_pandas()
+        # Set the first columns matching index_rename length as index
+        if len(index_rename) > 0:
+            index_cols = df.columns[: len(index_rename)].tolist()
+            df = df.set_index(index_cols)
+
     df.index = df.index.rename(index_rename)
     style = df.style.format(precision=2)
     style = style.format_index(precision=2)

@@ -48,7 +48,9 @@ class OrdinalCategoricalSinglePlot:
         sg = Seismogram()
         self.cohort_col = next(iter(cohort_dict))
         self.cohort_values = list(cohort_dict[self.cohort_col])
-        self.dataframe = sg.dataframe[[self.cohort_col, self.metric_col]]
+        # Select columns, avoiding duplicates for Polars compatibility
+        cols = [self.cohort_col, self.metric_col] if self.cohort_col != self.metric_col else [self.cohort_col]
+        self.dataframe = sg.dataframe[cols]
         self.censor_threshold = sg.censor_threshold
 
         self.plot_functions = self.initialize_plot_functions()
@@ -112,28 +114,62 @@ class OrdinalCategoricalSinglePlot:
         pd.DataFrame
             DataFrame containing the counts of each unique value in the metric column grouped by cohort.
         """
-        df = (
-            self.dataframe.groupby([self.cohort_col, self.metric_col], observed=False).size().reset_index(name="count")
-        )
-        df = df.pivot(index=self.cohort_col, columns=self.metric_col, values="count").fillna(0)
-        df = df.loc[self.cohort_values]
+        import polars as pl
 
+        # Group by and count
+        df = self.dataframe.group_by([self.cohort_col, self.metric_col]).len(name="count")
+
+        # Pivot to wide format
+        df = df.pivot(on=self.metric_col, index=self.cohort_col, values="count").fill_null(0)
+
+        # Filter to selected cohort values and maintain order
+        df = df.filter(pl.col(self.cohort_col).is_in(self.cohort_values))
+
+        # Sort by cohort values in the order they appear in self.cohort_values
+        # Create a mapping for ordering
+        order_map = {v: i for i, v in enumerate(self.cohort_values)}
+        df = (
+            df.with_columns(
+                pl.col(self.cohort_col)
+                .map_elements(lambda x: order_map.get(x, 999), return_dtype=pl.Int64)
+                .alias("_order")
+            )
+            .sort("_order")
+            .drop("_order")
+        )
+
+        # Add missing columns with zero values
         missing = [v for v in self.values if v not in df.columns]
         if missing:
-            df = df.assign(**{col: 0 for col in missing})
+            df = df.with_columns([pl.lit(0).alias(col) for col in missing])
             logger.warning(f"The following metric values are missing: {missing}")
+
+        # Select available values and cast to int
         available_values = [v for v in self.values if v in df.columns]
-        df = df[available_values].astype(int)
-        df = df[df.sum(axis=1) >= self.censor_threshold]
-        df = df.iloc[::-1]
+        df = df.select([self.cohort_col] + available_values)
+        for col in available_values:
+            df = df.with_columns(pl.col(col).cast(pl.Int64))
+
+        # Filter by censor threshold (sum across row)
+        row_sums = pl.sum_horizontal([pl.col(c) for c in available_values])
+        df = df.filter(row_sums >= self.censor_threshold)
+
+        # Reverse order
+        df = df.reverse()
+
         # Instrument name (in other words, type of metric we are logging)
         instr_name = Seismogram().metrics[self.metric_col].display_name
-        for cohort in df.index:
+        for row in df.iter_rows(named=True):
+            cohort_value = row[self.cohort_col]
+            metrics_dict = {k: v for k, v in row.items() if k != self.cohort_col}
             self.recorder.populate_metrics(
-                attributes={self.cohort_col: cohort}, metrics={instr_name: df.loc[cohort].to_dict()}
+                attributes={self.cohort_col: cohort_value}, metrics={instr_name: metrics_dict}
             )
 
-        return df
+        # Convert to pandas with proper index structure for likert_plot
+        df_pandas = df.to_pandas().set_index(self.cohort_col)
+        df_pandas.columns.name = self.metric_col
+        return df_pandas
 
     def generate_plot(self):
         """
