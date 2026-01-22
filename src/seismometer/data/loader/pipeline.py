@@ -140,6 +140,16 @@ class SeismogramLoader:
         dataframe = self._add_events(dataframe, event_obj)
 
         dataframe = self.post_load_fn(self.config, dataframe)
+
+        # Clone dataframe to force memory consolidation and release temporary buffers
+        # This reduces memory footprint after merges without changing to pandas
+        if hasattr(dataframe, "clone"):
+            logger.debug("Cloning polars DataFrame to consolidate memory")
+            import gc
+
+            dataframe = dataframe.clone()
+            gc.collect()
+
         return dataframe
 
     def _load_predictions(self, prediction_obj: pd.DataFrame = None):
