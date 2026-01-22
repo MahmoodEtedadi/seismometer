@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 from seismometer.core.io import write_yaml
 
@@ -25,8 +25,8 @@ def generate_dictionary_from_parquet(
         The column name of data relevant to defining the dictionary; currently used
         for events section, by default "Type".
     """
-    df = pd.read_parquet(inpath)
-    if df.empty:
+    df = pl.read_parquet(inpath)
+    if len(df) == 0:
         raise ValueError("No data loaded; check the input file")
 
     datadict = None
@@ -41,7 +41,7 @@ def generate_dictionary_from_parquet(
     write_yaml(datadict.model_dump(), outpath)
 
 
-def _generate_prediction_dictionary(df: pd.DataFrame) -> PredictionDictionary:
+def _generate_prediction_dictionary(df: pl.DataFrame) -> PredictionDictionary:
     """Generates dictionary based on columns in the DataFrame"""
     items = [
         DictionaryItem(name=c, dtype=str(df[c].dtype), definition=f"Placeholder description for {c}")
@@ -50,14 +50,14 @@ def _generate_prediction_dictionary(df: pd.DataFrame) -> PredictionDictionary:
     return PredictionDictionary(predictions=items)
 
 
-def _generate_event_dictionary(df, column="Type") -> EventDictionary:
+def _generate_event_dictionary(df: pl.DataFrame, column="Type") -> EventDictionary:
     """Generates entry for each unique value in the specified column"""
     items = (
         [
             DictionaryItem(name=c, dtype="string", definition=f"Placeholder description for {c}")
-            for c in df[column].unique()
+            for c in df[column].unique().to_list()
         ]
-        if column in df
+        if column in df.columns
         else []
     )
     return EventDictionary(events=items)

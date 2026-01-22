@@ -119,11 +119,14 @@ def _score_target_levels_and_index(
     sg = Seismogram()
 
     score_bins = sg.score_bins()
-    # Convert to pandas Series if needed for pd.cut
+    # Use polars native cut (no pandas conversion needed)
     output_col = sg.dataframe[sg.output]
-    if hasattr(output_col, "to_pandas"):
-        output_col = output_col.to_pandas()
-    cut_bins = pd.cut(output_col, score_bins)
+    if hasattr(output_col, "cut"):
+        # Polars Series - use native cut
+        cut_bins = output_col.cut(score_bins)
+    else:
+        # Pandas Series - use pandas cut
+        cut_bins = pd.cut(output_col, score_bins)
 
     groupby_groups = [selected_attribute]
     grab_groups = [selected_attribute]
@@ -190,22 +193,51 @@ def _get_cohort_summary_dataframes(by_target: bool, by_score: bool) -> dict[str,
     dict[str, list[str]]
         The dictionary, indexed by cohort attribute (e.g. Race), of summary dataframes.
     """
+    import polars as pl
+
     sg = Seismogram()
 
     dfs: dict[str, list[str]] = {}
 
     available_cohort_groups = sg.available_cohort_groups
 
+    # If by_score, add temporary binned score column to dataframe
+    dataframe = sg.dataframe
+    temp_score_col = None
+    if by_score:
+        score_bins = sg.score_bins()
+        temp_score_col = f"_temp_score_bins_{id(dataframe)}"
+        if isinstance(dataframe, pl.DataFrame):
+            # Polars: add binned column
+            dataframe = dataframe.with_columns(dataframe[sg.output].cut(score_bins).alias(temp_score_col))
+        else:
+            # Pandas: add binned column
+            dataframe = dataframe.copy()
+            dataframe[temp_score_col] = pd.cut(dataframe[sg.output], score_bins)
+
     for attribute, options in available_cohort_groups.items():
-        df = default_cohort_summaries(sg.dataframe, attribute, options, sg.config.entity_id)
+        df = default_cohort_summaries(dataframe, attribute, options, sg.config.entity_id)
         styled = _style_cohort_summaries(df, attribute)
 
         dfs[attribute] = [styled.to_html()]
 
         if by_score or by_target:
-            groupby_groups, grab_groups, index_rename = _score_target_levels_and_index(attribute, by_target, by_score)
+            groupby_groups = [attribute]
+            grab_groups = [attribute]
+            index_rename = ["Cohort"]
 
-            results = score_target_cohort_summaries(sg.dataframe, groupby_groups, grab_groups, sg.config.entity_id)
+            if by_score:
+                # Use the temp column for both grouping and grabbing
+                groupby_groups.append(temp_score_col)
+                grab_groups.append(temp_score_col)
+                index_rename.append(sg.output)
+
+            if by_target:
+                groupby_groups.append(sg.target)
+                grab_groups.append(sg.target)
+                index_rename.append(sg.target.removesuffix("_Value"))
+
+            results = score_target_cohort_summaries(dataframe, groupby_groups, grab_groups, sg.config.entity_id)
             results_styled = _style_score_target_cohort_summaries(results, index_rename, attribute)
 
             dfs[attribute].append(results_styled.to_html())

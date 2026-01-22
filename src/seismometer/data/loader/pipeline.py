@@ -157,18 +157,24 @@ class SeismogramLoader:
         Load and merge events onto the predictions dataframe.
         Prioritizes event_obj if provided, else loads from configuration.
         """
+
         event_frame = self._load_events(event_obj)
-        if event_frame.empty:  # No events to add
+        # Check if empty (works for both pandas and polars)
+        is_empty = event_frame.empty if hasattr(event_frame, "empty") else len(event_frame) == 0
+        if is_empty:  # No events to add
             logger.debug("No events were loaded; nothing added to frame.")
             return dataframe
 
         event_frame = self.post_event_fn(self.config, event_frame)
         return self.merge_fn(self.config, event_frame, dataframe)
 
-    def _load_events(self, event_obj: pd.DataFrame = None) -> pd.DataFrame:
+    def _load_events(self, event_obj=None):
         """Load events from config or memory."""
+        import polars as pl
+
         if (event_obj is None) and (self.event_fn is None):
-            return pd.DataFrame()
+            # Return empty polars DataFrame
+            return pl.DataFrame()
         if event_obj is None:
             return self.event_fn(self.config)
         return self.event_from_memory(self.config, event_obj)

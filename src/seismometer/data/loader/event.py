@@ -90,21 +90,22 @@ def parquet_loader(config: ConfigProvider) -> pd.DataFrame:
     pd.DataFrame
         the events dataframe with standarized column names.
     """
+    import polars as pl
+
     logger.debug(f"Loading events from {config.event_path}.")
     try:
-        events = pd.read_parquet(config.event_path).rename(
-            columns={config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"},
-            copy=False,
+        events = pl.read_parquet(config.event_path).rename(
+            {config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"}
         )
         logger.debug(f"Loaded {len(events)} events from {config.event_path}.")
     except BaseException:
         logger.warning(f"No events found at {config.event_path}")
-        events = pd.DataFrame(columns=config.entity_keys + ["Type", "Time", "Value"])
+        events = pl.DataFrame({col: [] for col in config.entity_keys + ["Type", "Time", "Value"]})
 
     return events
 
 
-def post_transform_fn(config: ConfigProvider, events: pd.DataFrame) -> pd.DataFrame:
+def post_transform_fn(config: ConfigProvider, events):
     """
     Converts the Time column in events to a datetime64[ns] type, to be compatible with other operations.
 
@@ -112,16 +113,23 @@ def post_transform_fn(config: ConfigProvider, events: pd.DataFrame) -> pd.DataFr
     ----------
     config : ConfigProvider
         The loaded configuration object.
-    events : pd.DataFrame
+    events : Union[pd.DataFrame, pl.DataFrame]
         The events dataframe.
 
     Returns
     -------
-    pd.DataFrame
+    Union[pd.DataFrame, pl.DataFrame]
         The transformed events dataframe.
     """
+    import polars as pl
+
     # Time column in events is known
-    events["Time"] = events["Time"].astype("<M8[ns]")
+    if isinstance(events, pl.DataFrame):
+        # Polars: cast to datetime with ns precision
+        events = events.with_columns(pl.col("Time").cast(pl.Datetime("ns")))
+    else:
+        # Pandas
+        events["Time"] = events["Time"].astype("<M8[ns]")
 
     logger.debug("Transformed events dataframe with Time as datetime64[ns].")
     return events
@@ -148,18 +156,35 @@ def merge_onto_predictions(config: ConfigProvider, event_frame: pd.DataFrame, da
     pd.DataFrame
         The merged dataframe of predictions plus new event columns.
     """
+    import polars as pl
+
     logger.debug("Merging events onto predictions dataframe.")
-    dataframe = (
-        dataframe.sort_values(config.predict_time, kind="mergesort")
-        .drop_duplicates(subset=config.entity_keys + [config.predict_time])
-        .dropna(subset=[config.predict_time])
-    )
+
+    # Prepare predictions
+    if isinstance(dataframe, pl.DataFrame):
+        dataframe = (
+            dataframe.sort(config.predict_time, maintain_order=True)
+            .unique(subset=config.entity_keys + [config.predict_time])
+            .drop_nulls(subset=[config.predict_time])
+        )
+    else:
+        dataframe = (
+            dataframe.sort_values(config.predict_time, kind="mergesort")
+            .drop_duplicates(subset=config.entity_keys + [config.predict_time])
+            .dropna(subset=[config.predict_time])
+        )
     logger.debug(
         f"Sorted predictions dataframe by {config.predict_time}, dropping duplicate (entity time, prediction time) "
         "and dropping predictions with Null prediction time."
     )
-    event_frame = event_frame.sort_values("Time", kind="mergesort")
 
+    # Prepare events
+    if isinstance(event_frame, pl.DataFrame):
+        event_frame = event_frame.sort("Time", maintain_order=True)
+    else:
+        event_frame = event_frame.sort_values("Time", kind="mergesort")
+
+    # Merge each event sequentially
     for one_event in config.events.values():
         logger.debug(f"Processing event {one_event.display_name} with sources {one_event.source}")
         # Get dtype
@@ -223,13 +248,25 @@ def _merge_event(
     impute_neg=0,
 ) -> pd.DataFrame:
     """Wrapper for calling merge_windowed_event with the correct event column names."""
+    import polars as pl
+
     disp_event = display if display else event_cols[0]
     logger.debug(f"Merging event {disp_event} with columns {event_cols} onto predictions dataframe.")
+
+    # Replace Type column values
+    if isinstance(event_frame, pl.DataFrame):
+        # Polars version - replace values in Type column where Type is in event_cols
+        event_frame_filtered = event_frame.with_columns(
+            pl.when(pl.col("Type").is_in(event_cols)).then(pl.lit(disp_event)).otherwise(pl.col("Type")).alias("Type")
+        )
+    else:
+        # Pandas version
+        event_frame_filtered = event_frame.replace({"Type": event_cols}, disp_event)
 
     return pdh.merge_windowed_event(
         dataframe,
         config.predict_time,
-        event_frame.replace({"Type": event_cols}, disp_event),
+        event_frame_filtered,
         disp_event,
         config.entity_keys,
         min_leadtime_hrs=offset_hrs,
@@ -275,21 +312,25 @@ def _get_source_type(config: ConfigProvider, event: Event) -> str:
 
 def _sv_loader(config: ConfigProvider, sep) -> pd.DataFrame:
     """General loader for CSV or TSV files"""
+    import polars as pl
+
     try:
-        events = pd.read_csv(config.event_path, sep=sep).rename(
-            columns={config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"},
-            copy=False,
+        events = pl.read_csv(config.event_path, separator=sep).rename(
+            {config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"}
         )
 
         # since importing CSVs automatically cast numbers to ints, make sure the columns
         # shared with predictions become strings so we don't have a type mismatch
         defined_types = config.prediction_types
         usage = config.usage
+        cast_cols = []
         for col in [usage.entity_id, usage.context_id, usage.predict_time]:
-            if col is not None and defined_types[col] == "object":
-                events[col] = events[col].astype(str)
+            if col is not None and col in events.columns and defined_types.get(col) == "object":
+                cast_cols.append(pl.col(col).cast(pl.String))
+        if cast_cols:
+            events = events.with_columns(cast_cols)
     except BaseException:
         logger.warning(f"No events found at {config.event_path}")
-        events = pd.DataFrame(columns=config.entity_keys + ["Type", "Time", "Value"])
+        events = pl.DataFrame({col: [] for col in config.entity_keys + ["Type", "Time", "Value"]})
 
     return events

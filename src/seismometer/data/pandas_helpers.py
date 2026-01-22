@@ -394,7 +394,11 @@ def try_casting(dataframe: pl.DataFrame, column: str, column_dtype: str) -> pl.D
             "string": pl.String,
             "str": pl.String,
             "object": pl.String,
+            "category": pl.Categorical,
             "bool": pl.Boolean,
+            "datetime64[ns]": pl.Datetime("ns"),
+            "datetime64": pl.Datetime("ns"),
+            "datetime": pl.Datetime("ns"),
             "Int64": pl.Int64,  # Pandas nullable Int64
         }
         polars_dtype = (
