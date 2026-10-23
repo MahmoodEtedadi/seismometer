@@ -232,6 +232,15 @@ def _describe_supported(summary: dict) -> None:
     )
 
 
+def _shape(series: pd.Series, counts: pd.Series) -> dict:
+    """Kurtosis and skewness, 0 for a constant column as in ydata; pandas 3.1 returns nan."""
+    constant = len(counts) == 1 and np.isfinite(counts.index[0])
+    return {
+        "kurtosis": 0.0 if constant and len(series) >= 4 else series.kurt(),
+        "skewness": 0.0 if constant and len(series) >= 3 else series.skew(),
+    }
+
+
 def _describe_numeric(series: pd.Series, summary: dict) -> None:
     counts = summary["value_counts_without_nan"]
     n = summary["n"]
@@ -250,8 +259,7 @@ def _describe_numeric(series: pd.Series, summary: dict) -> None:
                 "variance": series.var(),
                 "min": series.min(),
                 "max": series.max(),
-                "kurtosis": series.kurt(),
-                "skewness": series.skew(),
+                **_shape(series, counts),
                 "sum": series.sum(),
             }
         )
@@ -267,8 +275,7 @@ def _describe_numeric(series: pd.Series, summary: dict) -> None:
                     "variance": np.var(present, ddof=1),
                     "min": np.min(values),
                     "max": np.max(values),
-                    "kurtosis": series.kurt(),
-                    "skewness": series.skew(),
+                    **_shape(series, counts),
                     "sum": np.dot(values, counts.to_numpy()),
                 }
             )

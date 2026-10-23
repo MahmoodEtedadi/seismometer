@@ -107,6 +107,11 @@ class TestProfile:
         keys = ["5%", "25%", "50%", "75%", "95%", "iqr"]
         assert [nullable[k] for k in keys] == pytest.approx([plain[k] for k in keys], nan_ok=True)
 
+    @pytest.mark.parametrize("value,dtype", [(7, "int64"), (7, "Int64"), (0.1, "float64"), (0.1, "Float64")])
+    def test_constant_columns_have_zero_kurtosis_and_skewness(self, value, dtype):
+        description = undertest.describe_series(pd.Series([value] * 1000, dtype=dtype))
+        assert (description["kurtosis"], description["skewness"]) == (0.0, 0.0)
+
     def test_alert_type_name(self):
         assert undertest.Alert(AlertType.HIGH_CARDINALITY).alert_type_name == "High cardinality"
 
