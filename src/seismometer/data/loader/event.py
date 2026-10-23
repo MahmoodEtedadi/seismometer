@@ -95,8 +95,7 @@ def parquet_loader(config: ConfigProvider) -> pd.DataFrame:
     logger.debug(f"Loading events from {config.event_path}.")
     try:
         events = pd.read_parquet(config.event_path)
-        # inplace avoids a data copy on pandas 2 without the `copy` keyword deprecated in pandas 3
-        events.rename(columns={config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"}, inplace=True)
+        _rename_event_columns(config, events)
         logger.debug(f"Loaded {len(events)} events from {config.event_path}.")
     except BaseException:
         logger.warning(f"No events found at {config.event_path}")
@@ -313,11 +312,17 @@ def _get_source_type(config: ConfigProvider, event: Event) -> str:
 # other
 
 
+def _rename_event_columns(config: ConfigProvider, events: pd.DataFrame) -> None:
+    """Renames the event columns in place, avoiding rename's data copy on pandas 2 and its deprecated inplace."""
+    names = {config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"}
+    events.columns = [names.get(col, col) for col in events.columns]
+
+
 def _sv_loader(config: ConfigProvider, sep) -> pd.DataFrame:
     """General loader for CSV or TSV files"""
     try:
         events = pd.read_csv(config.event_path, sep=sep)
-        events.rename(columns={config.ev_type: "Type", config.ev_time: "Time", config.ev_value: "Value"}, inplace=True)
+        _rename_event_columns(config, events)
 
         # since importing CSVs automatically cast numbers to ints, make sure the columns
         # shared with predictions become strings so we don't have a type mismatch
