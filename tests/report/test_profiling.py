@@ -162,9 +162,8 @@ class TestComparisonReportWrapper:
         assert [list(p.variables) for p in wrapper._report.profiles] == [["a"], ["a"]]
         assert wrapper._report.labels == ["left", "right"]
         assert wrapper._html_path.parent == tmp_path
-        assert "Feature Comparison Report Comparing left against right" in wrapper._html_path.read_text(
-            encoding="utf-8"
-        )
+        # titled after the datasets, as ydata-profiling titles comparisons
+        assert "<em>Comparing</em> left <em>and</em> right" in wrapper._html_path.read_text(encoding="utf-8")
 
 
 class TestSingleReportWrapper:

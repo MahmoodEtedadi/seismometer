@@ -100,7 +100,7 @@ class TestProfileReport:
             "Dataset statistics",
             "Number of observations",
             "Variable types",
-            "Alerts (21)",
+            'Alerts <span class="badge text-bg-secondary">21</span>',
             "Real number (&Ropf;)",
             "Quantile statistics",
             "Common values",

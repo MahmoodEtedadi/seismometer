@@ -655,7 +655,7 @@ class ProfileReport:
         profiles : list[DataProfile]
             One profile, or two to compare.
         title : str
-            The report title.
+            The report title. A comparison is titled after its datasets instead, as in ydata-profiling.
         labels : Optional[list[str]], optional
             Names for the datasets when comparing, by default the profile titles.
         """
