@@ -123,6 +123,12 @@ class TestProfileReport:
         for header in ["Alerts", "Reproduction"]:
             assert f'<p class="item-header">{header}</p>' in page
 
+    def test_variables_dropdown_lists_every_variable(self, profile):
+        page = undertest.ProfileReport([profile], title="T").to_html()
+        options = re.findall(r'<option value="(pp_var_[^"]+)">', page)
+        assert options == re.findall(r'class="variable" id="(pp_var_[^"]+)"', page)
+        assert len(options) == len(profile.variables)
+
     def test_values_are_escaped(self):
         profile = profile_dataframe(pd.DataFrame({"text": ["<script>alert(1)</script>", "b"]}))
         page = undertest.ProfileReport([profile], title="T").to_html()
