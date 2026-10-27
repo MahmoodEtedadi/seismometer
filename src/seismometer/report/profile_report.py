@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from jinja2 import Environment, PackageLoader, select_autoescape
 from markupsafe import Markup, escape
 from matplotlib import rc_context, rcParams
@@ -51,7 +52,8 @@ ALERT_STYLES = {
     "zeros": "info",
 }
 UNIQUE_HELP = "The number of unique values (all values that occur exactly once in the dataset)."
-# The seaborn darkgrid look of the ydata-profiling plots, independent of seismometer's own matplotlib style
+# The ydata-profiling plot style, independent of seismometer's own matplotlib style:
+# ydata's settings with seaborn's white style on top, as ydata applies them
 PLOT_STYLE = {
     "patch.facecolor": "#348ABD",
     "patch.antialiased": True,
@@ -94,6 +96,7 @@ PLOT_STYLE = {
     "ytick.minor.width": 0.5,
     "xtick.major.pad": 7,
     "ytick.major.pad": 7,
+    **sns.axes_style("white"),
 }
 
 _env = Environment(

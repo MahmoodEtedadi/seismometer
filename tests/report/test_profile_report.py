@@ -73,6 +73,10 @@ class TestFormatting:
     def test_date_ticks_past_year_9999_are_blank(self):
         assert undertest._date_tick(3e11) == ""
 
+    def test_plot_fonts_include_matplotlibs_own(self):
+        # without it, matplotlib warns on every label where Arial and Liberation Sans aren't installed
+        assert "DejaVu Sans" in undertest.PLOT_STYLE["font.sans-serif"]
+
 
 class TestAlerts:
     def test_wording_matches_ydata_profiling(self, profile):
