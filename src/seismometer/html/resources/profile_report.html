@@ -68,14 +68,23 @@
 {% endmacro %}
 {% macro tabs(group, entries) %}
 <div class="tabs">
-  {% for name, items in entries %}
+  {% for entry in entries %}
   <input type="radio" name="{{ group }}" id="{{ group }}-{{ loop.index0 }}"{% if loop.first %} checked{% endif %}>
-  <label for="{{ group }}-{{ loop.index0 }}">{{ name }}</label>
+  <label for="{{ group }}-{{ loop.index0 }}">{{ entry.name }}</label>
   {% endfor %}
-  {% for name, items in entries %}
-  <div class="panel">{{ caller(items) }}</div>
+  {% for entry in entries %}
+  <div class="panel">{{ caller(entry, loop.index0) }}</div>
   {% endfor %}
 </div>
+{% endmacro %}
+{% macro tab_items(group, tab) %}
+{% if tab.layout == "tabs" %}
+  {% call(sub, idx) tabs(group, tab["items"]) %}{{ tab_items(group ~ "-" ~ idx, sub) }}{% endcall %}
+{% elif tab.layout == "stack" %}
+  {% for it in tab["items"] %}<div>{{ item(it) }}</div>{% endfor %}
+{% else %}
+  <div class="grid">{% for it in tab["items"] %}<div>{{ item(it) }}</div>{% endfor %}</div>
+{% endif %}
 {% endmacro %}
 <!DOCTYPE html>
 <html lang="en">
@@ -148,8 +157,9 @@ img.plot { max-width: 100%; height: auto; }
 <div class="content">
 <h1 class="section" id="overview">Overview</h1>
 {% set alert_count = alerts | map("select") | map("list") | map("length") | sum %}
-{% call(items) tabs("overview", [("Overview", overview), ("Alerts (" ~ alert_count ~ ")", alerts), ("Reproduction", [reproduction])]) %}
-  {% if items is sameas alerts %}
+{% call(entry, idx) tabs("overview", [{"name": "Overview", "items": overview}, {"name": "Alerts (" ~ alert_count ~ ")", "items": alerts}, {"name": "Reproduction", "items": [reproduction]}]) %}
+  {% if entry["items"] is sameas alerts %}
+    <p class="item-header">Alerts</p>
     <table class="alerts">
       {{ value_header() }}
       <tbody>
@@ -165,7 +175,7 @@ img.plot { max-width: 100%; height: auto; }
       </tbody>
     </table>
   {% else %}
-    <div class="grid">{% for it in items %}<div>{{ item(it) }}</div>{% endfor %}</div>
+    <div class="grid">{% for it in entry["items"] %}<div>{{ item(it) }}</div>{% endfor %}</div>
   {% endif %}
 {% endcall %}
 <h1 class="section" id="variables">Variables</h1>
@@ -193,9 +203,8 @@ img.plot { max-width: 100%; height: auto; }
   {% if section.tabs %}
   <details>
     <summary>More details</summary>
-    {% call(items) tabs("var-" ~ var.anchor ~ "-" ~ dataset, section.tabs) %}
-      <div class="grid">{% for it in items %}<div>{{ item(it) }}</div>{% endfor %}</div>
-    {% endcall %}
+    {% set group = "var-" ~ var.anchor ~ "-" ~ dataset %}
+    {% call(tab, idx) tabs(group, section.tabs) %}{{ tab_items(group ~ "-" ~ idx, tab) }}{% endcall %}
   </details>
   {% endif %}
   {% endfor %}

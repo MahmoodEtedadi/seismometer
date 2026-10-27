@@ -447,6 +447,7 @@ def _numeric(summaries: list[dict]) -> tuple[list, list]:
                     f"Maximum {N_EXTREME} values",
                 ),
             ],
+            "tabs",
         ),
     ]
     return top, tabs
@@ -500,9 +501,9 @@ def _categorical(summaries: list[dict]) -> tuple[list, list]:
         "Common Values (Plot)",
     )
     if kind == "Boolean":
-        return top, [("Common Values", [common]), ("Common Values (Plot)", [plots])]
+        return top, [("Common Values (Table)", [common]), ("Common Values (Plot)", [plots])]
     common["name"] = "Common Values"
-    return top, [("Overview", _unique_and_sample(summaries)), ("Categories", [common, plots])]
+    return top, [("Overview", _unique_and_sample(summaries)), ("Categories", [common, plots], "stack")]
 
 
 def _text(summaries: list[dict]) -> tuple[list, list]:
@@ -588,6 +589,17 @@ def _unique_anchors(columns: list[str]) -> dict[str, str]:
     return anchors
 
 
+def _tab(name: str, items: list, layout: str = "row") -> dict:
+    """
+    A tab of variable details laid out as in ydata-profiling: its items side by side ("row"), one under another
+    ("stack"), or each in a tab of its own named after the item ("tabs").
+    """
+    items = [item for item in items if item]
+    if layout == "tabs":
+        items = [{"name": item["name"], "items": [item | {"name": None}]} for item in items]
+    return {"name": name, "items": items, "layout": layout}
+
+
 def _variable(column: str, profiles: list[DataProfile], anchor: str) -> dict:
     alerts = [
         [a for a in p.alerts if a.column_name == column and a.alert_type != AlertType.REJECTED] for p in profiles
@@ -613,8 +625,7 @@ def _variable(column: str, profiles: list[DataProfile], anchor: str) -> dict:
         "types": [Markup(TYPE_LABELS[s["type"]]) if s is not None else "(not present)" for s in summaries],
         "alerts": [[_alert_badge(a) for a in column_alerts] for column_alerts in alerts],
         "sections": [
-            {"top": [item for item in top if item], "tabs": [(name, [i for i in items if i]) for name, items in tabs]}
-            for top, tabs in sections
+            {"top": [item for item in top if item], "tabs": [_tab(*tab) for tab in tabs]} for top, tabs in sections
         ],
     }
 
@@ -694,7 +705,8 @@ class ProfileReport:
                 ("Analysis finished", [str(p.finished) for p in profiles]),
                 ("Duration", [fmt_timespan((p.finished - p.started).total_seconds()) for p in profiles]),
                 ("Software version", [f"seismometer v{seismometer.__version__}" for _ in profiles]),
-            ]
+            ],
+            name="Reproduction",
         )
         template = _env.get_template("profile_report.html")
         return template.render(

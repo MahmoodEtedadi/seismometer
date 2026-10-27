@@ -114,6 +114,15 @@ class TestProfileReport:
             assert text in page, text
         assert page.count('class="variable"') == len(profile.variables)
 
+    def test_tabs_are_laid_out_as_in_ydata(self, profile):
+        page = undertest.ProfileReport([profile], title="T").to_html()
+        # extreme values get a tab each, titled by the tab instead of a header
+        assert page.count(">Minimum 5 values</label>") == 6
+        assert 'class="item-header">Minimum 5 values' not in page
+        assert page.count(">Common Values (Table)</label>") == 2  # the boolean columns
+        for header in ["Alerts", "Reproduction"]:
+            assert f'<p class="item-header">{header}</p>' in page
+
     def test_values_are_escaped(self):
         profile = profile_dataframe(pd.DataFrame({"text": ["<script>alert(1)</script>", "b"]}))
         page = undertest.ProfileReport([profile], title="T").to_html()
