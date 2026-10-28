@@ -708,7 +708,7 @@ class TestMergeWindowedEvent:
         events = create_event_table(
             ids, ctxs, event_name, event_times=event_times, event_values=range(len(event_times))
         )
-        events.rename(columns={"Id": "Id_", "CtxId": "CtxId_"}, inplace=True)  # break key match
+        events = events.rename(columns={"Id": "Id_", "CtxId": "CtxId_"})  # break key match
 
         with pytest.raises(ValueError, match="No common keys"):
             _ = undertest.merge_windowed_event(
