@@ -404,7 +404,8 @@ class Seismogram(object, metaclass=Singleton):
                     logger.warning(f"Failed to resolve cohort {disp_attr}: {exc}")
                     continue
             else:
-                new_col = pd.Series(pd.Categorical(self.dataframe[cohort.source]))
+                # a category column keeps the categories of values that load-time filters removed
+                new_col = pd.Series(pd.Categorical(self.dataframe[cohort.source])).cat.remove_unused_categories()
 
             # validate counts (per observation)
             if (N := len(new_col.cat.categories)) > MAXIMUM_NUM_COHORTS:  # More accurate if censor first

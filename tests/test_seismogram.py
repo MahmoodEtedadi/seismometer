@@ -274,6 +274,21 @@ class TestSeismogramCreateCohorts:
         assert "card3" in caplog.text
         assert sg.cohort_cols == ["cohort1", "cohort2"]
 
+    @patch.object(seismometer.seismogram, "MAXIMUM_NUM_COHORTS", 2)
+    def test_unused_categories_are_not_counted(self, fake_seismo, tmp_path, caplog):
+        # a category column keeps the categories of values that load-time filters removed
+        sg = Seismogram()
+        sg.dataframe = get_test_data()
+        sg.dataframe["filtered"] = pd.Categorical([0, 1, 1, 0], categories=[0, 1, 2, 3])
+        sg.config.cohorts = sg.config.cohorts + [Cohort(source="filtered")]
+
+        with caplog.at_level(logging.WARNING, logger="seismometer"):
+            sg.create_cohorts()
+
+        assert not caplog.records
+        assert sg.cohort_cols == ["cohort1", "cohort2", "filtered"]
+        assert sg.dataframe["filtered"].cat.categories.tolist() == [0, 1]
+
     def test_censor_limit_logs_warning_and_drops(self, fake_seismo, tmp_path, caplog):
         # Arrange
         sg = Seismogram()
