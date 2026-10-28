@@ -56,6 +56,7 @@ class Alert:
 
     @property
     def alert_type_name(self) -> str:
+        """The alert type as ydata-profiling names it, e.g. "High cardinality"."""
         return self.alert_type.name.replace("_", " ").capitalize()
 
 
@@ -144,7 +145,19 @@ def describe_series(series: pd.Series) -> dict:
 
 
 def detect_type(series: pd.Series) -> str:
-    """The variable type: Boolean, Categorical, Numeric, DateTime, Text, or Unsupported (including all-missing)."""
+    """
+    Finds the variable type of a column, as ydata-profiling does.
+
+    Parameters
+    ----------
+    series : pd.Series
+        The column.
+
+    Returns
+    -------
+    str
+        Boolean, Categorical, Numeric, DateTime, Text, or Unsupported (including all-missing columns).
+    """
     present = series.dropna()
     if present.empty:
         return "Unsupported"
@@ -401,7 +414,15 @@ def imbalance_score(counts: pd.Series) -> float:
     """
     One minus the entropy of the value counts over the largest possible entropy for that many classes.
 
-    0 for evenly spread values (or a single value), 1 when nearly all rows share one value.
+    Parameters
+    ----------
+    counts : pd.Series
+        The count of each distinct value.
+
+    Returns
+    -------
+    float
+        0 for evenly spread values (or a single value), 1 when nearly all rows share one value.
     """
     if len(counts) <= 1:
         return 0

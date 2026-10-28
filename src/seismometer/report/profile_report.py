@@ -8,6 +8,7 @@ import math
 import re
 from datetime import datetime, timedelta
 from io import StringIO
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -109,7 +110,21 @@ _env = Environment(
 
 # region formatting
 def fmt_percent(value: float, edge_cases: bool = True) -> str:
-    """A ratio as a percentage with one decimal; tiny and near-total ratios show as < 0.1% and > 99.9%."""
+    """
+    Formats a ratio as a percentage with one decimal.
+
+    Parameters
+    ----------
+    value : float
+        The ratio, from 0 to 1.
+    edge_cases : bool, optional
+        Whether ratios that would round to 0% or 100% show as "< 0.1%" and "> 99.9%", by default True.
+
+    Returns
+    -------
+    str
+        The percentage, e.g. "50.0%".
+    """
     if edge_cases and round(value, 3) == 0 and value > 0:
         return "< 0.1%"
     if edge_cases and round(value, 3) == 1 and value < 1:
@@ -118,7 +133,21 @@ def fmt_percent(value: float, edge_cases: bool = True) -> str:
 
 
 def fmt_numeric(value: Any, precision: int = 10) -> Markup:
-    """A number with the given significant digits, with exponents written as x 10<sup>n</sup>."""
+    """
+    Formats a number with the given significant digits.
+
+    Parameters
+    ----------
+    value : Any
+        The number, or None.
+    precision : int, optional
+        The number of significant digits, by default 10.
+
+    Returns
+    -------
+    Markup
+        The number, with exponents written as × 10<sup>n</sup>, or "N/A" for None.
+    """
     if value is None:
         return Markup("N/A")
     text = f"{{:.{precision}g}}".format(value)
@@ -131,14 +160,40 @@ def fmt_numeric(value: Any, precision: int = 10) -> Markup:
 
 
 def fmt(value: Any) -> Markup:
-    """Python numbers as fmt_numeric, anything else as escaped text."""
+    """
+    Formats a value for the report.
+
+    Parameters
+    ----------
+    value : Any
+        The value.
+
+    Returns
+    -------
+    Markup
+        Python floats and ints formatted by fmt_numeric, anything else as escaped text.
+    """
     if type(value) in [float, int]:
         return fmt_numeric(value)
     return escape(value)
 
 
 def fmt_bytesize(num: float, suffix: str = "B") -> str:
-    """A size in bytes with binary units, e.g. 16.7 MiB."""
+    """
+    Formats a size with binary units.
+
+    Parameters
+    ----------
+    num : float
+        The size, in bytes.
+    suffix : str, optional
+        The unit after the binary prefix, by default "B".
+
+    Returns
+    -------
+    str
+        The size, e.g. "16.7 MiB".
+    """
     for unit in ["", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"]:
         if abs(num) < 1024.0:
             return f"{num:3.1f} {unit}{suffix}"
@@ -147,6 +202,19 @@ def fmt_bytesize(num: float, suffix: str = "B") -> str:
 
 
 def fmt_monotonic(value: int) -> str:
+    """
+    Names a column's monotonicity.
+
+    Parameters
+    ----------
+    value : int
+        2 or 1 for strictly increasing or increasing, 0 for neither, -1 or -2 for decreasing or strictly decreasing.
+
+    Returns
+    -------
+    str
+        The name, e.g. "Strictly increasing".
+    """
     return {
         2: "Strictly increasing",
         1: "Increasing",
@@ -157,7 +225,19 @@ def fmt_monotonic(value: int) -> str:
 
 
 def fmt_timespan(seconds: float) -> str:
-    """A duration such as 1.2 seconds or 3 minutes and 4.5 seconds."""
+    """
+    Formats a duration.
+
+    Parameters
+    ----------
+    seconds : float
+        The duration, in seconds.
+
+    Returns
+    -------
+    str
+        The duration, e.g. "1.2 seconds" or "3 minutes and 4.5 seconds".
+    """
     if seconds < 60:
         text = re.sub(r"\.?0+$", "", f"{seconds:.2f}")
         return f"{text} second{'' if math.floor(seconds) == 1 else 's'}"
@@ -189,7 +269,21 @@ _ALERT_TEMPLATES = {
 
 
 def alert_html(alert: Alert, anchor: Optional[str] = None) -> str:
-    """The alert's sentence, with the column name linked to its section of the report (at anchor, if given)."""
+    """
+    Describes an alert in a sentence, worded as in ydata-profiling.
+
+    Parameters
+    ----------
+    alert : Alert
+        The alert.
+    anchor : Optional[str], optional
+        The anchor of the column's section of the report, by default the one made from the column name.
+
+    Returns
+    -------
+    str
+        HTML for the sentence, with the column name linked to its section of the report.
+    """
     anchor = anchor or _anchor(alert.column_name)
     name = Markup('<a href="#pp_var_{}"><code>{}</code></a>').format(anchor, alert.column_name)
     template = _env.from_string(_ALERT_TEMPLATES.get(alert.alert_type, "{{ name }}"))
@@ -719,8 +813,15 @@ class ProfileReport:
             variables=[_variable(col, profiles, anchors[col]) for col in columns],
         )
 
-    def to_file(self, path) -> None:
-        """Writes the report as an HTML file."""
+    def to_file(self, path: str | Path) -> None:
+        """
+        Writes the report as an HTML file.
+
+        Parameters
+        ----------
+        path : str | Path
+            The file to write.
+        """
         page = self.to_html()  # before opening, so a failed render leaves no empty file
         with open(path, "w", encoding="utf-8") as f:
             f.write(page)
