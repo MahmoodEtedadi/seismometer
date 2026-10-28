@@ -53,6 +53,8 @@ def merge_windowed_event(
     Imputation of no event to negative label - if no row in the events frame is present for the prediction keys, it is
     assumed to be a Negative label (default 0) but will not have an event time.
 
+    .. versionchanged:: NEXT_VERSION_PLACEHOLDER
+       With sort, sorts copies of the predictions and events instead of the passed dataframes.
 
     Parameters
     ----------
@@ -81,7 +83,8 @@ def merge_windowed_event(
     event_base_time_col : str, optional
         The name of the column in the events frame to merge as the _Time, by default 'Time'.
     sort : bool
-        Whether or not to sort the predictions/events dataframes, by default True.
+        Whether or not to sort the predictions/events dataframes, by default True; the passed dataframes are left
+        unchanged.
     merge_strategy : str
         The method to use when merging the event data, by default 'forward'.
         Options are 'forward', 'nearest', 'first', 'last', and 'count'.
@@ -121,8 +124,8 @@ def merge_windowed_event(
     min_offset = pd.Timedelta(min_leadtime_hrs, unit="hr")
 
     if sort:
-        predictions.sort_values(predtime_col, kind="mergesort", inplace=True)
-        events.sort_values(event_base_time_col, kind="mergesort", inplace=True)
+        predictions = predictions.sort_values(predtime_col, kind="mergesort")
+        events = events.sort_values(event_base_time_col, kind="mergesort")
 
     # Preprocess events : reduce and rename
     one_event = _one_event(events, event_label, event_base_val_col, event_base_time_col, pks)

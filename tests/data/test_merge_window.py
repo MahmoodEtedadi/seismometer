@@ -739,7 +739,7 @@ class TestMergeWindowedEvent:
             predictions, "PredictTime", events, event_name, ["Id", "CtxId"], min_leadtime_hrs=0, window_hrs=12
         )
 
-        pdt.assert_frame_equal(actual, predictions, check_dtype=False)
+        pdt.assert_frame_equal(actual, predictions.sort_values("PredictTime", kind="mergesort"), check_dtype=False)
 
     def test_ctx_not_key_not_added(self):
         # Use two ctxs
