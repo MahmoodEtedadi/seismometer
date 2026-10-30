@@ -1,5 +1,5 @@
 """
-Regenerates tests/resources/profile/ydata_golden.json, the ydata-profiling results the profile tests compare against.
+Regenerates tests/resources/profile/golden.json, the ydata-profiling results the profile tests compare against.
 
 Needs pandas 2 and ydata-profiling 4.18, which seismometer no longer depends on, plus the report_config.yml that
 seismometer passed to ydata (seismometer 0.5.0, src/seismometer/report/report_config.yml):
@@ -17,7 +17,7 @@ from profile_cases import make_profile_frame
 from ydata_profiling import ProfileReport, __version__
 from ydata_profiling.report.presentation.flavours.html import templates
 
-OUT = Path(__file__).parents[1] / "resources" / "profile" / "ydata_golden.json"
+OUT = Path(__file__).parents[1] / "resources" / "profile" / "golden.json"
 SCALARS = [
     "type", "n", "count", "n_missing", "p_missing", "n_distinct", "p_distinct", "n_unique", "p_unique", "is_unique",
     "imbalance", "n_zeros", "p_zeros", "n_infinite", "p_infinite", "n_negative", "p_negative", "mean", "std",

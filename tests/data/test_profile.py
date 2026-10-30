@@ -10,7 +10,7 @@ from profile_cases import make_profile_frame
 import seismometer.data.profile as undertest
 from seismometer.data.profile import AlertType
 
-GOLDEN_PATH = "profile/ydata_golden.json"
+GOLDEN_PATH = "profile/golden.json"
 # Memory depends on the pandas version and string dtype, not on the profile logic
 NOT_COMPARED = {"memory_size", "record_size"}
 

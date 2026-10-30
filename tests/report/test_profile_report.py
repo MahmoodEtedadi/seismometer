@@ -15,7 +15,7 @@ from seismometer.data.profile import AlertType, profile_dataframe
 sys.path.insert(0, str(Path(__file__).parents[1] / "data"))
 from profile_cases import make_profile_frame  # noqa: E402
 
-GOLDEN = Path(__file__).parents[1] / "resources" / "profile" / "ydata_golden.json"
+GOLDEN = Path(__file__).parents[1] / "resources" / "profile" / "golden.json"
 
 
 @pytest.fixture(scope="module")
